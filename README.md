@@ -1,2 +1,11 @@
 # PingFlux
-Lightweight local app that tracks your internetâ€™s latency, jitter, and loss â€” with an embedded web dashboard.
+
+Baseline do projeto PingFlux para verificarmos o esqueleto inicial.
+
+## Pré-requisitos
+- Node.js (versão LTS recomendada)
+- npm
+
+## Como rodar
+- npm install
+- npm start
