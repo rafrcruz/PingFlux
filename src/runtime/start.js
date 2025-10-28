@@ -1,5 +1,5 @@
 import { getConfig } from "../config/index.js";
-import { openDb, migrate } from "../storage/db.js";
+import { openDb, migrate, closeDb } from "../storage/db.js";
 import * as pingCollector from "../collectors/ping.js";
 import * as dnsCollector from "../collectors/dns.js";
 import * as httpCollector from "../collectors/http.js";
@@ -32,16 +32,22 @@ function parsePort(rawPort, fallback) {
 
 async function main() {
   const config = getConfig();
-  const enableWeb = toBooleanFlag(process.env.ENABLE_WEB, true);
-  const enablePing = toBooleanFlag(process.env.ENABLE_PING, true);
-  const enableDns = toBooleanFlag(process.env.ENABLE_DNS, true);
-  const enableHttp = toBooleanFlag(process.env.ENABLE_HTTP, true);
+  const featureDefaults = config.features ?? {};
+  const enableWeb = toBooleanFlag(process.env.ENABLE_WEB, featureDefaults.enableWeb ?? true);
+  const enablePing = toBooleanFlag(process.env.ENABLE_PING, featureDefaults.enablePing ?? true);
+  const enableDns = toBooleanFlag(process.env.ENABLE_DNS, featureDefaults.enableDns ?? true);
+  const enableHttp = toBooleanFlag(process.env.ENABLE_HTTP, featureDefaults.enableHttp ?? true);
 
   const db = openDb();
   try {
     migrate();
   } catch (error) {
     console.error("[runtime] Failed to migrate database:", error);
+    try {
+      closeDb();
+    } catch (closeError) {
+      console.error("[runtime] Error while closing database after migration failure:", closeError);
+    }
     process.exit(1);
     return;
   }
@@ -89,6 +95,12 @@ async function main() {
       }
     }
 
+    try {
+      closeDb();
+    } catch (error) {
+      console.error("[runtime] Error while closing database:", error);
+    }
+
     resolveShutdown();
     return shutdownPromise;
   };
@@ -125,7 +137,7 @@ async function main() {
         })
       );
       if (typeof module.stop === "function") {
-        stopFns.push(() => module.stop());
+        stopFns.push(() => Promise.resolve(module.stop()));
       } else {
         stopFns.push(() => Promise.resolve());
       }
@@ -155,8 +167,9 @@ async function main() {
   if (enableWeb) {
     try {
       const port = parsePort(process.env.PORT ?? config?.server?.port, 3030);
-      serverHandle = await startServer({ host: "127.0.0.1", port, db });
-      console.log(`[runtime] Web server listening on http://127.0.0.1:${port}`);
+      const host = config?.server?.host ?? "127.0.0.1";
+      serverHandle = await startServer({ host, port, db });
+      console.log(`[runtime] Web server listening on http://${host}:${port}`);
     } catch (error) {
       console.error("[runtime] Failed to start web server:", error);
       await initiateShutdown("web error");
