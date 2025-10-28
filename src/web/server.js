@@ -30,6 +30,571 @@ const RANGE_TO_DURATION_MS = {
   "24h": 24 * 60 * 60 * 1000,
 };
 
+const RANGE_OPTIONS = Object.freeze(Object.keys(RANGE_TO_DURATION_MS));
+const RAW_UI_DEFAULT_RANGE = String(process.env.UI_DEFAULT_RANGE ?? "").trim().toLowerCase();
+const UI_DEFAULT_RANGE = RANGE_OPTIONS.includes(RAW_UI_DEFAULT_RANGE) ? RAW_UI_DEFAULT_RANGE : "1h";
+const UI_DEFAULT_TARGET = String(process.env.UI_DEFAULT_TARGET ?? "").trim();
+
+function renderIndexHtml() {
+  const appConfig = {
+    defaultTarget: UI_DEFAULT_TARGET,
+    defaultRange: UI_DEFAULT_RANGE,
+    ranges: RANGE_OPTIONS,
+  };
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PingFlux</title>
+    <style>
+      :root {
+        color-scheme: dark light;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.4;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+        background: #0d1017;
+        color: #f3f5f9;
+      }
+
+      main {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 24px 16px 48px;
+      }
+
+      header {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 24px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 2rem;
+      }
+
+      form {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: flex-end;
+      }
+
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 0.9rem;
+      }
+
+      input[type="text"],
+      select {
+        padding: 6px 10px;
+        border-radius: 4px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: rgba(17, 22, 31, 0.7);
+        color: inherit;
+        min-width: 140px;
+      }
+
+      button {
+        padding: 8px 16px;
+        border-radius: 4px;
+        border: none;
+        background: #2563eb;
+        color: white;
+        cursor: pointer;
+        font-size: 0.95rem;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: wait;
+      }
+
+      .card {
+        background: rgba(15, 18, 27, 0.85);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 16px;
+        margin-top: 24px;
+      }
+
+      .chart-container {
+        width: 100%;
+        height: 320px;
+        position: relative;
+      }
+
+      svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .message {
+        margin-top: 12px;
+        font-size: 0.95rem;
+        color: #facc15;
+      }
+
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 12px;
+        margin-top: 12px;
+      }
+
+      .summary-item {
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 6px;
+        padding: 12px;
+      }
+
+      .summary-label {
+        font-size: 0.8rem;
+        color: rgba(243, 245, 249, 0.7);
+      }
+
+      .summary-value {
+        font-size: 1.2rem;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>PingFlux</h1>
+        <p>Monitoramento simples de RTT por alvo.</p>
+      </header>
+      <form id="controls" autocomplete="off">
+        <label>
+          Target
+          <input type="text" name="target" id="target" list="target-options" placeholder="ex: 8.8.8.8" />
+          <datalist id="target-options"></datalist>
+        </label>
+        <label>
+          Range
+          <select name="range" id="range">
+            ${RANGE_OPTIONS.map((range) => `<option value="${range}">${range}</option>`).join("")}
+          </select>
+        </label>
+        <button type="submit" id="submit">Atualizar</button>
+      </form>
+      <p class="message" id="message"></p>
+      <section class="card">
+        <div class="chart-container">
+          <svg id="chart" viewBox="0 0 600 320" role="img" aria-label="Gráfico de RTT"></svg>
+        </div>
+      </section>
+      <section class="card">
+        <h2 style="margin-top:0">Resumo</h2>
+        <div class="summary-grid">
+          <div class="summary-item">
+            <div class="summary-label">Loss médio (%)</div>
+            <div class="summary-value" id="summary-loss">--</div>
+          </div>
+          <div class="summary-item">
+            <div class="summary-label">P95 mais recente (ms)</div>
+            <div class="summary-value" id="summary-p95">--</div>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script type="module">
+      const APP_CONFIG = ${JSON.stringify(appConfig)};
+
+      const RANGE_OPTIONS = APP_CONFIG.ranges;
+      const DEFAULT_RANGE = APP_CONFIG.defaultRange || "1h";
+      const DEFAULT_TARGET = APP_CONFIG.defaultTarget || "";
+
+      const form = document.getElementById("controls");
+      const targetInput = document.getElementById("target");
+      const targetDatalist = document.getElementById("target-options");
+      const rangeSelect = document.getElementById("range");
+      const submitButton = document.getElementById("submit");
+      const messageEl = document.getElementById("message");
+      const chartSvg = document.getElementById("chart");
+      const summaryLoss = document.getElementById("summary-loss");
+      const summaryP95 = document.getElementById("summary-p95");
+
+      function parseInitialState() {
+        const params = new URLSearchParams(window.location.search);
+        let range = params.get("range")?.toLowerCase() || "";
+        if (!RANGE_OPTIONS.includes(range)) {
+          range = RANGE_OPTIONS.includes(DEFAULT_RANGE) ? DEFAULT_RANGE : "1h";
+        }
+
+        let target = params.get("target")?.trim() || "";
+        if (!target) {
+          target = DEFAULT_TARGET;
+        }
+
+        return { range, target };
+      }
+
+      function setMessage(text, tone = "info") {
+        messageEl.textContent = text || "";
+        messageEl.style.color = tone === "error" ? "#f97316" : tone === "muted" ? "rgba(243,245,249,0.7)" : "#facc15";
+      }
+
+      function extractTargets(payload) {
+        if (!payload) {
+          return [];
+        }
+        if (Array.isArray(payload)) {
+          const unique = new Set();
+          for (const row of payload) {
+            if (row?.target) {
+              unique.add(String(row.target));
+            }
+          }
+          return Array.from(unique);
+        }
+        if (typeof payload === "object") {
+          return Object.keys(payload);
+        }
+        return [];
+      }
+
+      function coerceNumber(value) {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : null;
+      }
+
+      function formatNumber(value, digits = 2) {
+        if (value === null || value === undefined || Number.isNaN(value)) {
+          return "--";
+        }
+        return Number(value).toFixed(digits);
+      }
+
+      function renderSummary(rows) {
+        if (!rows || rows.length === 0) {
+          summaryLoss.textContent = "--";
+          summaryP95.textContent = "--";
+          return;
+        }
+
+        const totalLoss = rows.reduce((acc, row) => acc + (coerceNumber(row.loss_pct) ?? 0), 0);
+        const avgLoss = rows.length > 0 ? totalLoss / rows.length : null;
+        const latest = rows[rows.length - 1];
+        const latestP95 = coerceNumber(latest?.p95_ms);
+
+        summaryLoss.textContent = avgLoss !== null ? formatNumber(avgLoss, 2) : "--";
+        summaryP95.textContent = latestP95 !== null ? formatNumber(latestP95, 0) : "--";
+      }
+
+      function renderChart(rows) {
+        chartSvg.innerHTML = "";
+        if (!rows || rows.length === 0) {
+          const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          text.setAttribute("x", "50%");
+          text.setAttribute("y", "50%");
+          text.setAttribute("dominant-baseline", "middle");
+          text.setAttribute("text-anchor", "middle");
+          text.textContent = "Sem dados no período selecionado.";
+          chartSvg.appendChild(text);
+          return;
+        }
+
+        const padding = { top: 16, right: 32, bottom: 32, left: 48 };
+        const width = 600;
+        const height = 320;
+        chartSvg.setAttribute("viewBox", "0 0 " + width + " " + height);
+
+        const points = rows.map((row) => ({
+          ts: coerceNumber(row.ts_min),
+          p50: coerceNumber(row.p50_ms),
+          p95: coerceNumber(row.p95_ms),
+        })).filter((row) => row.ts !== null);
+
+        if (points.length === 0) {
+          const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          text.setAttribute("x", "50%");
+          text.setAttribute("y", "50%");
+          text.setAttribute("dominant-baseline", "middle");
+          text.setAttribute("text-anchor", "middle");
+          text.textContent = "Sem dados no período selecionado.";
+          chartSvg.appendChild(text);
+          return;
+        }
+
+        const minTs = points.reduce((min, p) => (p.ts < min ? p.ts : min), points[0].ts);
+        const maxTs = points.reduce((max, p) => (p.ts > max ? p.ts : max), points[0].ts);
+        const minValue = points.reduce((min, p) => {
+          const values = [p.p50, p.p95].filter((v) => v !== null);
+          if (values.length === 0) {
+            return min;
+          }
+          const localMin = Math.min(...values);
+          return localMin < min ? localMin : min;
+        }, Number.POSITIVE_INFINITY);
+        const maxValue = points.reduce((max, p) => {
+          const values = [p.p50, p.p95].filter((v) => v !== null);
+          if (values.length === 0) {
+            return max;
+          }
+          const localMax = Math.max(...values);
+          return localMax > max ? localMax : max;
+        }, Number.NEGATIVE_INFINITY);
+
+        if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+          const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          text.setAttribute("x", "50%");
+          text.setAttribute("y", "50%");
+          text.setAttribute("dominant-baseline", "middle");
+          text.setAttribute("text-anchor", "middle");
+          text.textContent = "Sem dados no período selecionado.";
+          chartSvg.appendChild(text);
+          return;
+        }
+
+        const rangeTs = maxTs - minTs || 1;
+        const rangeValue = maxValue - minValue || 1;
+
+        function projectX(ts) {
+          return padding.left + ((ts - minTs) / rangeTs) * (width - padding.left - padding.right);
+        }
+
+        function projectY(value) {
+          const normalized = (value - minValue) / rangeValue;
+          return height - padding.bottom - normalized * (height - padding.top - padding.bottom);
+        }
+
+        const axis = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        axis.setAttribute("stroke", "rgba(255,255,255,0.2)");
+        axis.setAttribute("fill", "none");
+
+        const xAxis = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        xAxis.setAttribute("x1", padding.left);
+        xAxis.setAttribute("x2", width - padding.right);
+        xAxis.setAttribute("y1", height - padding.bottom);
+        xAxis.setAttribute("y2", height - padding.bottom);
+        axis.appendChild(xAxis);
+
+        const yAxis = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        yAxis.setAttribute("x1", padding.left);
+        yAxis.setAttribute("x2", padding.left);
+        yAxis.setAttribute("y1", padding.top);
+        yAxis.setAttribute("y2", height - padding.bottom);
+        axis.appendChild(yAxis);
+
+        chartSvg.appendChild(axis);
+
+        const gridLines = 4;
+        for (let i = 0; i <= gridLines; i += 1) {
+          const fraction = i / gridLines;
+          const y = padding.top + (1 - fraction) * (height - padding.top - padding.bottom);
+          const grid = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          grid.setAttribute("x1", padding.left);
+          grid.setAttribute("x2", width - padding.right);
+          grid.setAttribute("y1", y);
+          grid.setAttribute("y2", y);
+          grid.setAttribute("stroke", "rgba(255,255,255,0.08)");
+          chartSvg.appendChild(grid);
+
+          const labelValue = minValue + fraction * rangeValue;
+          const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          label.setAttribute("x", padding.left - 8);
+          label.setAttribute("y", y + 4);
+          label.setAttribute("text-anchor", "end");
+          label.setAttribute("fill", "rgba(255,255,255,0.7)");
+          label.setAttribute("font-size", "11");
+          label.textContent = formatNumber(labelValue, 0);
+          chartSvg.appendChild(label);
+        }
+
+        const timestampFormatter = new Intl.DateTimeFormat(undefined, {
+          hour: "2-digit",
+          minute: "2-digit",
+          day: "2-digit",
+          month: "2-digit",
+        });
+
+        const xLabels = 4;
+        for (let i = 0; i <= xLabels; i += 1) {
+          const fraction = i / xLabels;
+          const ts = minTs + fraction * rangeTs;
+          const x = projectX(ts);
+          const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          label.setAttribute("x", x);
+          label.setAttribute("y", height - padding.bottom + 20);
+          label.setAttribute("text-anchor", "middle");
+          label.setAttribute("fill", "rgba(255,255,255,0.7)");
+          label.setAttribute("font-size", "11");
+          label.textContent = timestampFormatter.format(new Date(ts));
+          chartSvg.appendChild(label);
+        }
+
+        function buildPolyline(values, color) {
+          const pointsAttr = values
+            .map((point) => {
+              const value = point.value ?? null;
+              if (value === null) {
+                return null;
+              }
+              const x = projectX(point.ts).toFixed(2);
+              const y = projectY(value).toFixed(2);
+              return x + "," + y;
+            })
+            .filter(Boolean)
+            .join(" ");
+
+          const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+          polyline.setAttribute("fill", "none");
+          polyline.setAttribute("stroke-width", "2.5");
+          polyline.setAttribute("stroke", color);
+          polyline.setAttribute("points", pointsAttr);
+          return polyline;
+        }
+
+        const p50Series = points.map((p) => ({ ts: p.ts, value: p.p50 }));
+        const p95Series = points.map((p) => ({ ts: p.ts, value: p.p95 }));
+
+        chartSvg.appendChild(buildPolyline(p50Series, "#38bdf8"));
+        chartSvg.appendChild(buildPolyline(p95Series, "#f97316"));
+
+        const legend = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        legend.setAttribute("transform", "translate(" + padding.left + ", " + padding.top + ")");
+
+        function legendItem(label, color, index) {
+          const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+          group.setAttribute("transform", "translate(" + index * 140 + ", 0)");
+
+          const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          line.setAttribute("x1", 0);
+          line.setAttribute("x2", 24);
+          line.setAttribute("y1", 0);
+          line.setAttribute("y2", 0);
+          line.setAttribute("stroke", color);
+          line.setAttribute("stroke-width", "3");
+          group.appendChild(line);
+
+          const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+          text.setAttribute("x", 32);
+          text.setAttribute("y", 4);
+          text.setAttribute("fill", "rgba(255,255,255,0.9)");
+          text.setAttribute("font-size", "12");
+          text.textContent = label;
+          group.appendChild(text);
+
+          return group;
+        }
+
+        legend.appendChild(legendItem("p50 ms", "#38bdf8", 0));
+        legend.appendChild(legendItem("p95 ms", "#f97316", 1));
+        chartSvg.appendChild(legend);
+      }
+
+      function updateTargetOptions(list) {
+        targetDatalist.innerHTML = "";
+        list.forEach((target) => {
+          const option = document.createElement("option");
+          option.value = target;
+          targetDatalist.appendChild(option);
+        });
+      }
+
+      async function fetchWindow(range, target) {
+        const params = new URLSearchParams({ range });
+        if (target) {
+          params.set("target", target);
+        }
+
+        const response = await fetch("/api/ping/window?" + params.toString());
+        if (!response.ok) {
+          throw new Error("Falha ao carregar dados (" + response.status + ")");
+        }
+        const payload = await response.json();
+
+        const targets = extractTargets(payload);
+        let resolvedTarget = target;
+        let rows;
+
+        if (!resolvedTarget && targets.length > 0) {
+          resolvedTarget = targets[0];
+        }
+
+        if (Array.isArray(payload)) {
+          rows = payload;
+          if (!resolvedTarget && rows.length > 0 && rows[0].target) {
+            resolvedTarget = String(rows[0].target);
+          }
+        } else if (resolvedTarget) {
+          rows = payload?.[resolvedTarget] ?? [];
+        } else {
+          rows = [];
+        }
+
+        return { rows, targets, target: resolvedTarget ?? "" };
+      }
+
+      function updateQueryString(range, target) {
+        const url = new URL(window.location.href);
+        url.searchParams.set("range", range);
+        if (target) {
+          url.searchParams.set("target", target);
+        } else {
+          url.searchParams.delete("target");
+        }
+        window.history.replaceState(null, "PingFlux", url.toString());
+      }
+
+      async function load(range, target) {
+        setMessage("Carregando dados...", "muted");
+        submitButton.disabled = true;
+
+        try {
+          const { rows, targets, target: resolvedTarget } = await fetchWindow(range, target);
+          updateTargetOptions(targets);
+          targetInput.value = resolvedTarget;
+          rangeSelect.value = range;
+          updateQueryString(range, resolvedTarget);
+
+          if (!rows || rows.length === 0) {
+            setMessage("Sem dados no período selecionado.", "muted");
+          } else {
+            setMessage("");
+          }
+
+          renderChart(rows);
+          renderSummary(rows);
+        } catch (error) {
+          console.error(error);
+          setMessage(error.message || "Erro ao carregar dados.", "error");
+          renderChart([]);
+          renderSummary([]);
+        } finally {
+          submitButton.disabled = false;
+        }
+      }
+
+      const initial = parseInitialState();
+      rangeSelect.value = initial.range;
+      targetInput.value = initial.target;
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        const range = rangeSelect.value;
+        const target = targetInput.value.trim();
+        load(range, target);
+      });
+
+      load(initial.range, initial.target);
+    </script>
+  </body>
+</html>`;
+}
+
 function resolveRangeWindow(rawRange) {
   const normalized = typeof rawRange === "string" ? rawRange.trim().toLowerCase() : "";
   const rangeKey = RANGE_TO_DURATION_MS[normalized] ? normalized : "1h";
@@ -182,7 +747,7 @@ function createRequestHandler(db) {
     }
 
     if (method === "GET" && parsedUrl.pathname === "/") {
-      sendHtml(res, 200, "<!DOCTYPE html><html><body><h1>PingFlux UI online</h1></body></html>");
+      sendHtml(res, 200, renderIndexHtml());
       return;
     }
 
