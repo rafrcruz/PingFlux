@@ -126,7 +126,13 @@ async function main() {
     try {
       const port = parsePort(process.env.PORT ?? config?.server?.port, 3030);
       const host = config?.server?.host ?? "127.0.0.1";
-      serverHandle = await startServer({ host, port, db, signal: shutdownSignal });
+      serverHandle = await startServer({
+        host,
+        port,
+        db,
+        signal: shutdownSignal,
+        config,
+      });
       registerOnShutdown(async () => {
         if (!serverHandle) {
           return;
