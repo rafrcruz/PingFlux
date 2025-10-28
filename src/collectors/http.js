@@ -131,7 +131,7 @@ function resolveHttpModule(urlObject) {
   return null;
 }
 
-export async function fetchOnce(url) {
+export async function fetchOnce(url, { signal } = {}) {
   const settings = getHttpSettings();
   const timeoutMs = settings.timeoutMs;
   const trimmedUrl = String(url ?? "").trim();
@@ -162,25 +162,48 @@ export async function fetchOnce(url) {
     return sample;
   }
 
+  if (signal?.aborted) {
+    return sample;
+  }
+
+  activeHttpRequest = null;
+
   return new Promise((resolve) => {
     const startTime = process.hrtime.bigint();
     let bytesReceived = 0;
     let settled = false;
     let timeoutTimer = null;
+    let request;
+
+    const cleanup = () => {
+      if (timeoutTimer !== null) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
+      if (signal && abortHandler) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+      if (activeHttpRequest === request) {
+        activeHttpRequest = null;
+      }
+    };
 
     const finalize = () => {
       if (settled) {
         return;
       }
       settled = true;
-      if (timeoutTimer !== null) {
-        clearTimeout(timeoutTimer);
-        timeoutTimer = null;
-      }
+      cleanup();
       resolve(sample);
     };
 
-    let request;
+    const abortHandler = () => {
+      if (request) {
+        request.destroy(new Error("HTTP request aborted"));
+      }
+      finalize();
+    };
+
     try {
       request = httpModule.request(
         parsedUrl,
@@ -191,6 +214,7 @@ export async function fetchOnce(url) {
             Accept: "*/*",
             Connection: "close",
           },
+          signal,
         },
         (response) => {
           sample.status = response.statusCode ?? null;
@@ -222,6 +246,7 @@ export async function fetchOnce(url) {
         }
       );
     } catch (error) {
+      cleanup();
       finalize();
       return;
     }
@@ -230,15 +255,26 @@ export async function fetchOnce(url) {
       finalize();
     });
 
+    if (signal) {
+      if (signal.aborted) {
+        abortHandler();
+        return;
+      }
+      signal.addEventListener("abort", abortHandler, { once: true });
+    }
+
     timeoutTimer = setTimeout(() => {
       request.destroy(new Error("HTTP request timeout"));
     }, timeoutMs);
+    timeoutTimer.unref?.();
+
+    activeHttpRequest = request;
 
     request.end();
   });
 }
 
-export async function measureCycle(urls) {
+export async function measureCycle(urls, { signal } = {}) {
   ensureDbReady();
   const providedList = Array.isArray(urls) ? urls : getHttpSettings().urls;
   const list = providedList
@@ -248,8 +284,11 @@ export async function measureCycle(urls) {
   const samples = [];
 
   for (const entry of list) {
+    if (signal?.aborted) {
+      break;
+    }
     try {
-      const sample = await fetchOnce(entry);
+      const sample = await fetchOnce(entry, { signal });
       samples.push(sample);
     } catch (error) {
       samples.push({
@@ -293,8 +332,9 @@ export async function measureCycle(urls) {
 }
 
 let activeLoopController;
+let activeHttpRequest = null;
 
-function createLoopController() {
+function createLoopController({ signal } = {}) {
   const settings = getHttpSettings();
   const urls = settings.urls;
   console.log(
@@ -307,6 +347,9 @@ function createLoopController() {
   let stopRequested = false;
   let pendingSleepResolve = null;
   let pendingSleepTimer = null;
+
+  const loopAbortController = new AbortController();
+  const loopSignal = loopAbortController.signal;
 
   const requestStop = () => {
     if (!stopRequested) {
@@ -324,16 +367,31 @@ function createLoopController() {
       pendingSleepResolve = null;
       resolveSleep();
     }
+
+    if (activeHttpRequest) {
+      try {
+        activeHttpRequest.destroy(new Error("HTTP collector stopped"));
+      } catch (error) {
+        // Ignore errors while destroying active request during shutdown.
+      }
+    }
+
+    if (!loopAbortController.signal.aborted) {
+      loopAbortController.abort();
+    }
   };
 
-  const onSignal = (signal) => {
-    console.log(`\n[http] Caught ${signal}, stopping loop...`);
+  const abortHandler = () => {
+    console.log("[http] Abort signal received, stopping loop...");
     requestStop();
   };
 
-  const signals = ["SIGINT", "SIGTERM"];
-  for (const signal of signals) {
-    process.on(signal, onSignal);
+  if (signal) {
+    if (signal.aborted) {
+      abortHandler();
+    } else {
+      signal.addEventListener("abort", abortHandler);
+    }
   }
 
   const promise = (async () => {
@@ -341,7 +399,7 @@ function createLoopController() {
       while (!stopRequested) {
         const cycleStart = Date.now();
         try {
-          const samples = await measureCycle(urls);
+          const samples = await measureCycle(urls, { signal: loopSignal });
           console.log(
             `[http] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
           );
@@ -369,8 +427,8 @@ function createLoopController() {
         }
       }
     } finally {
-      for (const signal of signals) {
-        process.removeListener(signal, onSignal);
+      if (signal) {
+        signal.removeEventListener("abort", abortHandler);
       }
       if (pendingSleepTimer !== null) {
         clearTimeout(pendingSleepTimer);
@@ -384,18 +442,25 @@ function createLoopController() {
   return {
     promise,
     requestStop,
+    cleanup: () => {
+      if (signal) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+    },
   };
 }
 
-export async function runLoop() {
+export async function runLoop(options = {}) {
+  const { signal } = options ?? {};
   if (activeLoopController) {
     return activeLoopController.promise;
   }
 
-  activeLoopController = createLoopController();
+  activeLoopController = createLoopController({ signal });
   try {
     await activeLoopController.promise;
   } finally {
+    activeLoopController.cleanup?.();
     activeLoopController = null;
   }
 }

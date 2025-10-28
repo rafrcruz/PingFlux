@@ -123,26 +123,55 @@ export function getDnsSettings() {
   return cachedSettings;
 }
 
-function withTimeout(promise, timeoutMs) {
-  let timeoutId;
-  const timeoutPromise = new Promise((_, reject) => {
+function withTimeout(promise, timeoutMs, { signal } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId = null;
+
+    const cleanup = () => {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+      if (signal && abortHandler) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+    };
+
+    const finish = (handler) => {
+      return (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        handler(value);
+      };
+    };
+
+    const abortHandler = () => {
+      finish(reject)(Object.assign(new Error("DNS lookup aborted"), { name: "AbortError" }));
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        abortHandler();
+        return;
+      }
+      signal.addEventListener("abort", abortHandler, { once: true });
+    }
+
     timeoutId = setTimeout(() => {
       const timeoutError = new Error("DNS lookup timed out");
       timeoutError.code = TIMEOUT_ERROR_CODE;
-      reject(timeoutError);
+      finish(reject)(timeoutError);
     }, timeoutMs);
-  });
+    timeoutId.unref?.();
 
-  promise.catch(() => {
-    // Prevent unhandled rejections if the lookup finishes after a timeout.
-  });
-
-  return Promise.race([promise, timeoutPromise]).finally(() => {
-    clearTimeout(timeoutId);
+    promise.then(finish(resolve)).catch(finish(reject));
   });
 }
 
-export async function resolveOnce(hostname) {
+export async function resolveOnce(hostname, { signal } = {}) {
   const trimmedHost = String(hostname).trim();
   const settings = getDnsSettings();
   const ts = Date.now();
@@ -160,7 +189,7 @@ export async function resolveOnce(hostname) {
 
   const start = process.hrtime.bigint();
   try {
-    await withTimeout(dns.promises.lookup(trimmedHost), settings.timeoutMs);
+    await withTimeout(dns.promises.lookup(trimmedHost), settings.timeoutMs, { signal });
     const end = process.hrtime.bigint();
     const durationMs = Number(end - start) / 1e6;
     sample.lookup_ms = durationMs;
@@ -173,7 +202,7 @@ export async function resolveOnce(hostname) {
   return sample;
 }
 
-export async function measureCycle(hostnames) {
+export async function measureCycle(hostnames, { signal } = {}) {
   ensureDbReady();
   const providedList = Array.isArray(hostnames)
     ? hostnames
@@ -185,8 +214,11 @@ export async function measureCycle(hostnames) {
   const samples = [];
 
   for (const host of list) {
+    if (signal?.aborted) {
+      break;
+    }
     try {
-      const sample = await resolveOnce(host);
+      const sample = await resolveOnce(host, { signal });
       samples.push(sample);
     } catch (error) {
       samples.push({
@@ -234,7 +266,7 @@ function ensureDbReady() {
 
 let activeLoopController;
 
-function createLoopController() {
+function createLoopController({ signal } = {}) {
   const settings = getDnsSettings();
   const hostnames = settings.hostnames;
   console.log(
@@ -245,6 +277,9 @@ function createLoopController() {
   let stopRequested = false;
   let pendingSleepResolve = null;
   let pendingSleepTimer = null;
+
+  const loopAbortController = new AbortController();
+  const loopSignal = loopAbortController.signal;
 
   const requestStop = () => {
     if (!stopRequested) {
@@ -262,16 +297,23 @@ function createLoopController() {
       pendingSleepResolve = null;
       resolve();
     }
+
+    if (!loopAbortController.signal.aborted) {
+      loopAbortController.abort();
+    }
   };
 
-  const onSignal = (signal) => {
-    console.log(`\n[dns] Caught ${signal}, stopping loop...`);
+  const abortHandler = () => {
+    console.log("[dns] Abort signal received, stopping loop...");
     requestStop();
   };
 
-  const signals = ["SIGINT", "SIGTERM"];
-  for (const signal of signals) {
-    process.on(signal, onSignal);
+  if (signal) {
+    if (signal.aborted) {
+      abortHandler();
+    } else {
+      signal.addEventListener("abort", abortHandler);
+    }
   }
 
   const promise = (async () => {
@@ -279,7 +321,7 @@ function createLoopController() {
       while (!stopRequested) {
         const cycleStart = Date.now();
         try {
-          const samples = await measureCycle(hostnames);
+          const samples = await measureCycle(hostnames, { signal: loopSignal });
           console.log(
             `[dns] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
           );
@@ -307,9 +349,6 @@ function createLoopController() {
         }
       }
     } finally {
-      for (const signal of signals) {
-        process.removeListener(signal, onSignal);
-      }
       if (pendingSleepTimer !== null) {
         clearTimeout(pendingSleepTimer);
       }
@@ -322,18 +361,25 @@ function createLoopController() {
   return {
     promise,
     requestStop,
+    cleanup: () => {
+      if (signal) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+    },
   };
 }
 
-export async function runLoop() {
+export async function runLoop(options = {}) {
+  const { signal } = options ?? {};
   if (activeLoopController) {
     return activeLoopController.promise;
   }
 
-  activeLoopController = createLoopController();
+  activeLoopController = createLoopController({ signal });
   try {
     await activeLoopController.promise;
   } finally {
+    activeLoopController.cleanup?.();
     activeLoopController = null;
   }
 }

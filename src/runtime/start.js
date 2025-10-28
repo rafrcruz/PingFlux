@@ -4,6 +4,13 @@ import * as pingCollector from "../collectors/ping.js";
 import * as dnsCollector from "../collectors/dns.js";
 import * as httpCollector from "../collectors/http.js";
 import { startServer } from "../web/server.js";
+import {
+  getShutdownSignal,
+  registerOnShutdown,
+  initSignalHandlers,
+  waitForShutdown,
+  initiateShutdown,
+} from "./shutdown.js";
 
 function toBooleanFlag(value, defaultValue) {
   if (value === undefined || value === null || value === "") {
@@ -38,6 +45,8 @@ async function main() {
   const enableDns = toBooleanFlag(process.env.ENABLE_DNS, featureDefaults.enableDns ?? true);
   const enableHttp = toBooleanFlag(process.env.ENABLE_HTTP, featureDefaults.enableHttp ?? true);
 
+  const shutdownSignal = getShutdownSignal();
+
   const db = openDb();
   try {
     migrate();
@@ -52,71 +61,17 @@ async function main() {
     return;
   }
 
-  const collectorPromises = [];
-  const stopFns = [];
-
-  let serverHandle = null;
-  let shuttingDown = false;
-  let resolveShutdown;
-  const shutdownPromise = new Promise((resolve) => {
-    resolveShutdown = resolve;
-  });
-
-  const initiateShutdown = async (reason) => {
-    if (shuttingDown) {
-      return shutdownPromise;
-    }
-    shuttingDown = true;
-    console.log(`[runtime] Shutting down (${reason}).`);
-
-    const stopResults = await Promise.allSettled(
-      stopFns.map((fn) => {
-        try {
-          return fn();
-        } catch (error) {
-          return Promise.reject(error);
-        }
-      })
-    );
-
-    for (const result of stopResults) {
-      if (result.status === "rejected") {
-        console.error("[runtime] Error while stopping collector:", result.reason);
-      }
-    }
-
-    await Promise.allSettled(collectorPromises);
-
-    if (serverHandle && typeof serverHandle.close === "function") {
-      try {
-        await serverHandle.close();
-      } catch (error) {
-        console.error("[runtime] Error while closing server:", error);
-      }
-    }
-
+  registerOnShutdown(() => {
     try {
       closeDb();
     } catch (error) {
       console.error("[runtime] Error while closing database:", error);
     }
+  });
 
-    resolveShutdown();
-    return shutdownPromise;
-  };
+  const collectorPromises = [];
 
-  const signals = ["SIGINT", "SIGTERM"];
-  const signalHandlers = new Map();
-  for (const signal of signals) {
-    const handler = () => {
-      console.log(`\n[runtime] Received ${signal}, initiating shutdown...`);
-      initiateShutdown(signal);
-    };
-    signalHandlers.set(signal, handler);
-    process.on(signal, handler);
-  }
-
-  function registerCollector(name, module, enabled) {
+  const startCollector = (name, module, enabled) => {
     if (!enabled) {
       return false;
     }
@@ -127,33 +82,69 @@ async function main() {
     }
 
     try {
-      const promise = module.runLoop();
-      collectorPromises.push(
-        promise.catch((error) => {
+      const loopPromise = Promise.resolve(module.runLoop({ signal: shutdownSignal }));
+      collectorPromises.push(loopPromise);
+      loopPromise.catch((error) => {
+        if (!shutdownSignal.aborted) {
           console.error(`[runtime] Collector '${name}' exited with error:`, error);
-          if (!shuttingDown) {
-            initiateShutdown(`${name} error`);
-          }
-        })
-      );
+          initiateShutdown(`${name} error`).catch(() => {});
+        }
+      });
+
       if (typeof module.stop === "function") {
-        stopFns.push(() => Promise.resolve(module.stop()));
-      } else {
-        stopFns.push(() => Promise.resolve());
+        registerOnShutdown(async () => {
+          try {
+            await module.stop();
+          } catch (error) {
+            console.error(`[runtime] Error while stopping collector '${name}':`, error);
+          }
+        });
       }
+
       return true;
     } catch (error) {
       console.error(`[runtime] Failed to start collector '${name}':`, error);
-      initiateShutdown(`${name} start failure`);
+      initiateShutdown(`${name} start failure`).catch(() => {});
       return false;
     }
-  }
+  };
 
   const activeModules = {
-    ping: registerCollector("ping", pingCollector, enablePing),
-    dns: registerCollector("dns", dnsCollector, enableDns),
-    http: registerCollector("http", httpCollector, enableHttp),
+    ping: startCollector("ping", pingCollector, enablePing),
+    dns: startCollector("dns", dnsCollector, enableDns),
+    http: startCollector("http", httpCollector, enableHttp),
   };
+
+  if (collectorPromises.length > 0) {
+    registerOnShutdown(async () => {
+      await Promise.allSettled(collectorPromises);
+    });
+  }
+
+  let serverHandle = null;
+  if (enableWeb) {
+    try {
+      const port = parsePort(process.env.PORT ?? config?.server?.port, 3030);
+      const host = config?.server?.host ?? "127.0.0.1";
+      serverHandle = await startServer({ host, port, db, signal: shutdownSignal });
+      registerOnShutdown(async () => {
+        if (!serverHandle) {
+          return;
+        }
+        try {
+          await serverHandle.close();
+        } catch (error) {
+          console.error("[runtime] Error while closing server:", error);
+        }
+      });
+      console.log(`[runtime] Web server listening on http://${host}:${port}`);
+    } catch (error) {
+      console.error("[runtime] Failed to start web server:", error);
+      await initiateShutdown("web error");
+      process.exit(1);
+      return;
+    }
+  }
 
   const disabledModules = Object.entries({
     web: enableWeb,
@@ -163,20 +154,6 @@ async function main() {
   })
     .filter(([, enabled]) => !enabled)
     .map(([name]) => name);
-
-  if (enableWeb) {
-    try {
-      const port = parsePort(process.env.PORT ?? config?.server?.port, 3030);
-      const host = config?.server?.host ?? "127.0.0.1";
-      serverHandle = await startServer({ host, port, db });
-      console.log(`[runtime] Web server listening on http://${host}:${port}`);
-    } catch (error) {
-      console.error("[runtime] Failed to start web server:", error);
-      await initiateShutdown("web error");
-      process.exit(1);
-      return;
-    }
-  }
 
   const startedModules = Object.entries(activeModules)
     .filter(([, started]) => started)
@@ -189,11 +166,15 @@ async function main() {
     console.log(`[runtime] Modules disabled via flags: ${disabledModules.join(", ")}`);
   }
 
-  await shutdownPromise;
+  registerOnShutdown(() => {
+    console.log("[runtime] Shutdown complete.");
+  });
 
-  for (const [signal, handler] of signalHandlers.entries()) {
-    process.removeListener(signal, handler);
-  }
+  initSignalHandlers({ gracefulMs: 2000, forceMs: 5000 });
+
+  console.log("[runtime] Runtime initialized. Awaiting shutdown signal...");
+
+  await waitForShutdown();
 
   process.exit(0);
 }
