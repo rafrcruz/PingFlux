@@ -9,7 +9,9 @@
     "config:print": "node src/tools/config-print.js",
     "db:init": "node scripts/db-init.js",
     "db:health": "node scripts/db-health.js",
-    "db:reset": "node scripts/db-reset.js"
+    "db:reset": "node scripts/db-reset.js",
+    "dns:once": "node src/tools/dns-once.js",
+    "dns:loop": "node src/tools/dns-loop.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1"
