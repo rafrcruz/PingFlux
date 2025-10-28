@@ -5,6 +5,13 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "test": "echo \"(no tests yet)\" && exit 0"
+    "test": "echo \"(no tests yet)\" && exit 0",
+    "config:print": "node src/tools/config-print.js",
+    "db:init": "node scripts/db-init.js",
+    "db:health": "node scripts/db-health.js",
+    "db:reset": "node scripts/db-reset.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1"
   }
 }
