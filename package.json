@@ -11,7 +11,9 @@
     "db:health": "node scripts/db-health.js",
     "db:reset": "node scripts/db-reset.js",
     "dns:once": "node src/tools/dns-once.js",
-    "dns:loop": "node src/tools/dns-loop.js"
+    "dns:loop": "node src/tools/dns-loop.js",
+    "http:once": "node src/tools/http-once.js",
+    "http:loop": "node src/tools/http-loop.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1"

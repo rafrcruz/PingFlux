@@ -1,0 +1,362 @@
+import fs from "fs";
+import path from "path";
+import http from "http";
+import https from "https";
+import { openDb, migrate } from "../storage/db.js";
+
+const DEFAULT_URLS = ["https://example.com"];
+const DEFAULT_INTERVAL_S = 60;
+const DEFAULT_TIMEOUT_MS = 5000;
+const USER_AGENT = "PingFluxHttpCollector/1.0";
+
+let cachedSettings;
+let cachedEnvFileValues;
+let migrationsEnsured = false;
+
+function parseEnvFileOnce() {
+  if (cachedEnvFileValues) {
+    return cachedEnvFileValues;
+  }
+
+  const envPath = path.resolve(process.cwd(), ".env");
+  if (!fs.existsSync(envPath)) {
+    cachedEnvFileValues = {};
+    return cachedEnvFileValues;
+  }
+
+  const entries = {};
+  const content = fs.readFileSync(envPath, "utf8");
+  const lines = content.split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    const [rawKey, ...rest] = line.split("=");
+    if (!rawKey) {
+      continue;
+    }
+
+    const key = rawKey.trim();
+    if (!key) {
+      continue;
+    }
+
+    const rawValue = rest.join("=");
+    const normalized = rawValue.replace(/^['"]?(.*?)['"]?$/, "$1");
+    entries[key] = normalized;
+  }
+
+  cachedEnvFileValues = entries;
+  return cachedEnvFileValues;
+}
+
+function getEnvValue(name) {
+  if (process.env[name] !== undefined && process.env[name] !== "") {
+    return process.env[name];
+  }
+
+  const fileValues = parseEnvFileOnce();
+  if (fileValues[name] !== undefined && fileValues[name] !== "") {
+    return fileValues[name];
+  }
+
+  return undefined;
+}
+
+function parseUrls(raw) {
+  if (!raw) {
+    return [...DEFAULT_URLS];
+  }
+
+  const parts = String(raw)
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+
+  return parts.length > 0 ? parts : [...DEFAULT_URLS];
+}
+
+function toInteger(value, fallback) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function buildSettings() {
+  const urls = parseUrls(getEnvValue("HTTP_URLS"));
+  const intervalSeconds = toInteger(getEnvValue("HTTP_INTERVAL_S"), DEFAULT_INTERVAL_S);
+  const timeoutMs = toInteger(getEnvValue("HTTP_TIMEOUT_MS"), DEFAULT_TIMEOUT_MS);
+
+  return {
+    urls,
+    intervalMs: Math.max(intervalSeconds, 1) * 1000,
+    timeoutMs: Math.max(timeoutMs, 1),
+  };
+}
+
+export function getHttpSettings() {
+  if (!cachedSettings) {
+    cachedSettings = buildSettings();
+  }
+
+  return cachedSettings;
+}
+
+function ensureDbReady() {
+  if (!migrationsEnsured) {
+    migrate();
+    migrationsEnsured = true;
+  }
+}
+
+function resolveHttpModule(urlObject) {
+  if (!urlObject || !urlObject.protocol) {
+    return null;
+  }
+
+  if (urlObject.protocol === "http:") {
+    return http;
+  }
+
+  if (urlObject.protocol === "https:") {
+    return https;
+  }
+
+  return null;
+}
+
+export async function fetchOnce(url) {
+  const settings = getHttpSettings();
+  const timeoutMs = settings.timeoutMs;
+  const trimmedUrl = String(url ?? "").trim();
+  const ts = Date.now();
+  const sample = {
+    ts,
+    url: trimmedUrl,
+    status: null,
+    ttfb_ms: null,
+    total_ms: null,
+    bytes: null,
+    success: 0,
+  };
+
+  if (!trimmedUrl) {
+    return sample;
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(trimmedUrl);
+  } catch (error) {
+    return sample;
+  }
+
+  const httpModule = resolveHttpModule(parsedUrl);
+  if (!httpModule) {
+    return sample;
+  }
+
+  return new Promise((resolve) => {
+    const startTime = process.hrtime.bigint();
+    let bytesReceived = 0;
+    let settled = false;
+    let timeoutTimer = null;
+
+    const finalize = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutTimer !== null) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
+      resolve(sample);
+    };
+
+    let request;
+    try {
+      request = httpModule.request(
+        parsedUrl,
+        {
+          method: "GET",
+          headers: {
+            "User-Agent": USER_AGENT,
+            Accept: "*/*",
+            Connection: "close",
+          },
+        },
+        (response) => {
+          sample.status = response.statusCode ?? null;
+
+          const firstByteTime = process.hrtime.bigint();
+          sample.ttfb_ms = Number(firstByteTime - startTime) / 1e6;
+
+          response.on("data", (chunk) => {
+            if (chunk) {
+              bytesReceived += chunk.length;
+            }
+          });
+
+          response.on("end", () => {
+            const endTime = process.hrtime.bigint();
+            sample.total_ms = Number(endTime - startTime) / 1e6;
+            sample.bytes = bytesReceived;
+            sample.success = 1;
+            finalize();
+          });
+
+          response.on("aborted", () => {
+            finalize();
+          });
+
+          response.on("error", () => {
+            finalize();
+          });
+        }
+      );
+    } catch (error) {
+      finalize();
+      return;
+    }
+
+    request.on("error", () => {
+      finalize();
+    });
+
+    timeoutTimer = setTimeout(() => {
+      request.destroy(new Error("HTTP request timeout"));
+    }, timeoutMs);
+
+    request.end();
+  });
+}
+
+export async function measureCycle(urls) {
+  ensureDbReady();
+  const providedList = Array.isArray(urls) ? urls : getHttpSettings().urls;
+  const list = providedList
+    .map((entry) => String(entry ?? "").trim())
+    .filter((entry) => entry.length > 0);
+
+  const samples = [];
+
+  for (const entry of list) {
+    try {
+      const sample = await fetchOnce(entry);
+      samples.push(sample);
+    } catch (error) {
+      samples.push({
+        ts: Date.now(),
+        url: String(entry ?? "").trim(),
+        status: null,
+        ttfb_ms: null,
+        total_ms: null,
+        bytes: null,
+        success: 0,
+      });
+    }
+  }
+
+  if (samples.length === 0) {
+    return samples;
+  }
+
+  const db = openDb();
+  const insert = db.prepare(
+    "INSERT INTO http_sample (ts, url, status, ttfb_ms, total_ms, bytes, success) VALUES (@ts, @url, @status, @ttfb_ms, @total_ms, @bytes, @success)"
+  );
+
+  const insertMany = db.transaction((rows) => {
+    for (const row of rows) {
+      insert.run({
+        ts: row.ts,
+        url: row.url,
+        status: row.status ?? null,
+        ttfb_ms: row.ttfb_ms ?? null,
+        total_ms: row.total_ms ?? null,
+        bytes: row.bytes ?? null,
+        success: row.success ? 1 : 0,
+      });
+    }
+  });
+
+  insertMany(samples);
+
+  return samples;
+}
+
+export async function runLoop() {
+  const settings = getHttpSettings();
+  const urls = settings.urls;
+  console.log(
+    `[http] Starting HTTP loop for: ${urls.length ? urls.join(", ") : "(none)"}`
+  );
+  console.log(
+    `[http] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`
+  );
+
+  let stopRequested = false;
+  let pendingSleepResolve = null;
+  let pendingSleepTimer = null;
+
+  const onSigint = () => {
+    if (!stopRequested) {
+      console.log("\n[http] Caught interrupt, stopping loop...");
+      stopRequested = true;
+    }
+
+    if (pendingSleepTimer !== null) {
+      clearTimeout(pendingSleepTimer);
+      pendingSleepTimer = null;
+    }
+
+    if (typeof pendingSleepResolve === "function") {
+      const resolveSleep = pendingSleepResolve;
+      pendingSleepResolve = null;
+      resolveSleep();
+    }
+  };
+
+  process.once("SIGINT", onSigint);
+
+  try {
+    while (!stopRequested) {
+      const cycleStart = Date.now();
+      try {
+        const samples = await measureCycle(urls);
+        console.log(
+          `[http] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+        );
+      } catch (error) {
+        console.error("[http] Cycle error:", error);
+      }
+
+      if (stopRequested) {
+        break;
+      }
+
+      const elapsed = Date.now() - cycleStart;
+      const delay = Math.max(settings.intervalMs - elapsed, 0);
+      if (delay > 0 && !stopRequested) {
+        await new Promise((resolve) => {
+          pendingSleepResolve = resolve;
+          pendingSleepTimer = setTimeout(() => {
+            pendingSleepTimer = null;
+            pendingSleepResolve = null;
+            resolve();
+          }, delay);
+        });
+      }
+    }
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+    console.log("[http] Loop stopped.");
+  }
+}
