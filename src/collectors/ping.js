@@ -1,17 +1,17 @@
 import fs from "fs";
 import path from "path";
-import http from "http";
-import https from "https";
+import { spawn } from "child_process";
 import { openDb, migrate } from "../storage/db.js";
 
-const DEFAULT_URLS = ["https://example.com"];
+const DEFAULT_TARGETS = ["8.8.8.8"];
 const DEFAULT_INTERVAL_S = 60;
-const DEFAULT_TIMEOUT_MS = 5000;
-const USER_AGENT = "PingFluxHttpCollector/1.0";
+const DEFAULT_TIMEOUT_MS = 3000;
+const DEFAULT_METHOD = "system-ping";
 
 let cachedSettings;
 let cachedEnvFileValues;
 let migrationsEnsured = false;
+let activeLoopController = null;
 
 function parseEnvFileOnce() {
   if (cachedEnvFileValues) {
@@ -66,9 +66,9 @@ function getEnvValue(name) {
   return undefined;
 }
 
-function parseUrls(raw) {
+function parseTargets(raw) {
   if (!raw) {
-    return [...DEFAULT_URLS];
+    return [...DEFAULT_TARGETS];
   }
 
   const parts = String(raw)
@@ -76,7 +76,7 @@ function parseUrls(raw) {
     .map((part) => part.trim())
     .filter((part) => part.length > 0);
 
-  return parts.length > 0 ? parts : [...DEFAULT_URLS];
+  return parts.length > 0 ? parts : [...DEFAULT_TARGETS];
 }
 
 function toInteger(value, fallback) {
@@ -89,18 +89,20 @@ function toInteger(value, fallback) {
 }
 
 function buildSettings() {
-  const urls = parseUrls(getEnvValue("HTTP_URLS"));
-  const intervalSeconds = toInteger(getEnvValue("HTTP_INTERVAL_S"), DEFAULT_INTERVAL_S);
-  const timeoutMs = toInteger(getEnvValue("HTTP_TIMEOUT_MS"), DEFAULT_TIMEOUT_MS);
+  const targets = parseTargets(getEnvValue("PING_TARGETS"));
+  const intervalSeconds = toInteger(getEnvValue("PING_INTERVAL_S"), DEFAULT_INTERVAL_S);
+  const timeoutMs = toInteger(getEnvValue("PING_TIMEOUT_MS"), DEFAULT_TIMEOUT_MS);
+  const method = String(getEnvValue("PING_METHOD") ?? DEFAULT_METHOD).trim() || DEFAULT_METHOD;
 
   return {
-    urls,
+    targets,
     intervalMs: Math.max(intervalSeconds, 1) * 1000,
     timeoutMs: Math.max(timeoutMs, 1),
+    method,
   };
 }
 
-export function getHttpSettings() {
+export function getPingSettings() {
   if (!cachedSettings) {
     cachedSettings = buildSettings();
   }
@@ -115,150 +117,137 @@ function ensureDbReady() {
   }
 }
 
-function resolveHttpModule(urlObject) {
-  if (!urlObject || !urlObject.protocol) {
+function buildPingArgs(target, timeoutMs) {
+  if (process.platform === "win32") {
+    return ["-n", "1", "-w", String(Math.max(timeoutMs, 1)), target];
+  }
+
+  const deadlineSeconds = Math.max(Math.ceil(timeoutMs / 1000), 1);
+  if (process.platform === "darwin") {
+    return ["-n", "-c", "1", "-W", String(Math.max(timeoutMs, 1)), target];
+  }
+
+  return ["-n", "-c", "1", "-W", String(deadlineSeconds), target];
+}
+
+function parseRttFromOutput(output) {
+  if (!output) {
     return null;
   }
 
-  if (urlObject.protocol === "http:") {
-    return http;
+  const timeMatch = /time[=<\s]*([0-9]+(?:\.[0-9]+)?)\s*ms/i.exec(output);
+  if (timeMatch) {
+    const value = Number.parseFloat(timeMatch[1]);
+    return Number.isFinite(value) ? value : null;
   }
 
-  if (urlObject.protocol === "https:") {
-    return https;
+  const avgMatch = /min\/avg\/max(?:\/mdev)?\s*=\s*([0-9.]+)\/([0-9.]+)\/[0-9.]+/i.exec(output);
+  if (avgMatch) {
+    const avg = Number.parseFloat(avgMatch[2]);
+    return Number.isFinite(avg) ? avg : null;
+  }
+
+  const windowsMatch = /Average = ([0-9]+)ms/i.exec(output);
+  if (windowsMatch) {
+    const avg = Number.parseFloat(windowsMatch[1]);
+    return Number.isFinite(avg) ? avg : null;
   }
 
   return null;
 }
 
-export async function fetchOnce(url) {
-  const settings = getHttpSettings();
-  const timeoutMs = settings.timeoutMs;
-  const trimmedUrl = String(url ?? "").trim();
-  const ts = Date.now();
-  const sample = {
-    ts,
-    url: trimmedUrl,
-    status: null,
-    ttfb_ms: null,
-    total_ms: null,
-    bytes: null,
-    success: 0,
-  };
-
-  if (!trimmedUrl) {
-    return sample;
-  }
-
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(trimmedUrl);
-  } catch (error) {
-    return sample;
-  }
-
-  const httpModule = resolveHttpModule(parsedUrl);
-  if (!httpModule) {
-    return sample;
-  }
-
+function runPing(target, timeoutMs) {
   return new Promise((resolve) => {
-    const startTime = process.hrtime.bigint();
-    let bytesReceived = 0;
+    const args = buildPingArgs(target, timeoutMs);
+    const child = spawn("ping", args);
+    let stdout = "";
+    let stderr = "";
     let settled = false;
-    let timeoutTimer = null;
 
-    const finalize = () => {
+    const timeoutTimer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill("SIGTERM");
+        resolve({ success: false, output: stdout + stderr, timedOut: true });
+      }
+    }, timeoutMs + 500);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      if (timeoutTimer !== null) {
-        clearTimeout(timeoutTimer);
-        timeoutTimer = null;
-      }
-      resolve(sample);
-    };
-
-    let request;
-    try {
-      request = httpModule.request(
-        parsedUrl,
-        {
-          method: "GET",
-          headers: {
-            "User-Agent": USER_AGENT,
-            Accept: "*/*",
-            Connection: "close",
-          },
-        },
-        (response) => {
-          sample.status = response.statusCode ?? null;
-
-          const firstByteTime = process.hrtime.bigint();
-          sample.ttfb_ms = Number(firstByteTime - startTime) / 1e6;
-
-          response.on("data", (chunk) => {
-            if (chunk) {
-              bytesReceived += chunk.length;
-            }
-          });
-
-          response.on("end", () => {
-            const endTime = process.hrtime.bigint();
-            sample.total_ms = Number(endTime - startTime) / 1e6;
-            sample.bytes = bytesReceived;
-            sample.success = 1;
-            finalize();
-          });
-
-          response.on("aborted", () => {
-            finalize();
-          });
-
-          response.on("error", () => {
-            finalize();
-          });
-        }
-      );
-    } catch (error) {
-      finalize();
-      return;
-    }
-
-    request.on("error", () => {
-      finalize();
+      clearTimeout(timeoutTimer);
+      resolve({ success: false, output: stdout + stderr, error });
     });
 
-    timeoutTimer = setTimeout(() => {
-      request.destroy(new Error("HTTP request timeout"));
-    }, timeoutMs);
-
-    request.end();
+    child.on("close", (code) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutTimer);
+      resolve({ success: code === 0, output: stdout + stderr, code });
+    });
   });
 }
 
-export async function measureCycle(urls) {
+export async function measureOnce(target) {
   ensureDbReady();
-  const providedList = Array.isArray(urls) ? urls : getHttpSettings().urls;
+  const settings = getPingSettings();
+  const trimmedTarget = String(target ?? "").trim();
+  const ts = Date.now();
+  const sample = {
+    ts,
+    target: trimmedTarget,
+    method: settings.method,
+    rtt_ms: null,
+    success: 0,
+  };
+
+  if (!trimmedTarget) {
+    return sample;
+  }
+
+  const result = await runPing(trimmedTarget, settings.timeoutMs);
+  if (result.success) {
+    sample.success = 1;
+    sample.rtt_ms = parseRttFromOutput(result.output);
+  } else {
+    sample.success = 0;
+    sample.rtt_ms = null;
+  }
+
+  return sample;
+}
+
+export async function measureCycle(targets) {
+  ensureDbReady();
+  const providedList = Array.isArray(targets) ? targets : getPingSettings().targets;
   const list = providedList
-    .map((entry) => String(entry ?? "").trim())
-    .filter((entry) => entry.length > 0);
+    .map((target) => String(target).trim())
+    .filter((target) => target.length > 0);
 
   const samples = [];
 
-  for (const entry of list) {
+  for (const target of list) {
     try {
-      const sample = await fetchOnce(entry);
+      const sample = await measureOnce(target);
       samples.push(sample);
     } catch (error) {
       samples.push({
         ts: Date.now(),
-        url: String(entry ?? "").trim(),
-        status: null,
-        ttfb_ms: null,
-        total_ms: null,
-        bytes: null,
+        target,
+        method: getPingSettings().method,
+        rtt_ms: null,
         success: 0,
       });
     }
@@ -270,18 +259,16 @@ export async function measureCycle(urls) {
 
   const db = openDb();
   const insert = db.prepare(
-    "INSERT INTO http_sample (ts, url, status, ttfb_ms, total_ms, bytes, success) VALUES (@ts, @url, @status, @ttfb_ms, @total_ms, @bytes, @success)"
+    "INSERT INTO ping_sample (ts, target, method, rtt_ms, success) VALUES (@ts, @target, @method, @rtt_ms, @success)"
   );
 
   const insertMany = db.transaction((rows) => {
     for (const row of rows) {
       insert.run({
         ts: row.ts,
-        url: row.url,
-        status: row.status ?? null,
-        ttfb_ms: row.ttfb_ms ?? null,
-        total_ms: row.total_ms ?? null,
-        bytes: row.bytes ?? null,
+        target: row.target,
+        method: row.method,
+        rtt_ms: row.rtt_ms,
         success: row.success ? 1 : 0,
       });
     }
@@ -292,16 +279,14 @@ export async function measureCycle(urls) {
   return samples;
 }
 
-let activeLoopController;
-
 function createLoopController() {
-  const settings = getHttpSettings();
-  const urls = settings.urls;
+  const settings = getPingSettings();
+  const targets = settings.targets;
   console.log(
-    `[http] Starting HTTP loop for: ${urls.length ? urls.join(", ") : "(none)"}`
+    `[ping] Starting ping loop for: ${targets.length ? targets.join(", ") : "(none)"}`
   );
   console.log(
-    `[http] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`
+    `[ping] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`
   );
 
   let stopRequested = false;
@@ -310,7 +295,7 @@ function createLoopController() {
 
   const requestStop = () => {
     if (!stopRequested) {
-      console.log("[http] Stop requested.");
+      console.log("[ping] Stop requested.");
       stopRequested = true;
     }
 
@@ -320,14 +305,14 @@ function createLoopController() {
     }
 
     if (typeof pendingSleepResolve === "function") {
-      const resolveSleep = pendingSleepResolve;
+      const resolve = pendingSleepResolve;
       pendingSleepResolve = null;
-      resolveSleep();
+      resolve();
     }
   };
 
   const onSignal = (signal) => {
-    console.log(`\n[http] Caught ${signal}, stopping loop...`);
+    console.log(`\n[ping] Caught ${signal}, stopping loop...`);
     requestStop();
   };
 
@@ -341,12 +326,12 @@ function createLoopController() {
       while (!stopRequested) {
         const cycleStart = Date.now();
         try {
-          const samples = await measureCycle(urls);
+          const samples = await measureCycle(targets);
           console.log(
-            `[http] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+            `[ping] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
           );
         } catch (error) {
-          console.error("[http] Cycle error:", error);
+          console.error("[ping] Cycle error:", error);
         }
 
         if (stopRequested) {
@@ -364,8 +349,6 @@ function createLoopController() {
               resolve();
             }, delay);
           });
-          pendingSleepTimer = null;
-          pendingSleepResolve = null;
         }
       }
     } finally {
@@ -377,7 +360,7 @@ function createLoopController() {
       }
       pendingSleepTimer = null;
       pendingSleepResolve = null;
-      console.log("[http] Loop stopped.");
+      console.log("[ping] Loop stopped.");
     }
   })();
 
@@ -409,6 +392,6 @@ export async function stop() {
     activeLoopController.requestStop();
     await activeLoopController.promise;
   } catch (error) {
-    // Suppress shutdown errors to keep callers clean.
+    // Swallow errors during shutdown to avoid noisy stack traces in callers.
   }
 }
