@@ -1,11 +1,26 @@
-﻿import fs from "fs";
+import fs from "fs";
 import path from "path";
 
 const DEFAULTS = Object.freeze({
   NODE_ENV: "development",
   PORT: "3030",
+  HOST: "127.0.0.1",
   LOG_LEVEL: "info",
   DB_PATH: "./data/netmon.sqlite",
+  ENABLE_WEB: "true",
+  ENABLE_PING: "true",
+  ENABLE_DNS: "true",
+  ENABLE_HTTP: "true",
+  PING_TARGETS: "8.8.8.8",
+  PING_INTERVAL_S: "60",
+  PING_TIMEOUT_MS: "3000",
+  PING_METHOD: "auto",
+  DNS_HOSTNAMES: "google.com",
+  DNS_INTERVAL_S: "60",
+  DNS_TIMEOUT_MS: "3000",
+  HTTP_URLS: "https://example.com",
+  HTTP_INTERVAL_S: "60",
+  HTTP_TIMEOUT_MS: "5000",
 });
 
 const QUOTE_TRIM_PATTERN = /^['"]?(.*?)['"]?$/;
@@ -61,34 +76,127 @@ function toInteger(value, fallback) {
     return Number.isFinite(value) ? value : fallback;
   }
 
-  const parsed = parseInt(String(value), 10);
+  const parsed = Number.parseInt(String(value), 10);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function toBooleanFlag(value) {
-  if (value === undefined || value === null) {
-    return false;
+function toPositiveInteger(value, fallback) {
+  const parsed = toInteger(value, fallback);
+  return parsed > 0 ? parsed : fallback;
+}
+
+function toBoolean(value, fallback) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
   }
 
   const normalized = String(value).trim().toLowerCase();
-  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function toStringList(value, fallbackList) {
+  if (value === undefined || value === null) {
+    return [...fallbackList];
+  }
+
+  const items = String(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+
+  return items.length > 0 ? items : [...fallbackList];
+}
+
+function toMethodPreference(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  switch (normalized) {
+    case "icmp":
+    case "tcp":
+      return normalized;
+    case "auto":
+    default:
+      return "auto";
+  }
 }
 
 export function getConfig() {
   const envFilePath = path.resolve(process.cwd(), ".env");
   const fileVariables = parseEnvFile(envFilePath);
 
-  const env = resolveVar("NODE_ENV", fileVariables);
-  const port = toInteger(resolveVar("PORT", fileVariables), Number(DEFAULTS.PORT));
-  const logLevel = resolveVar("LOG_LEVEL", fileVariables);
-  const dbPath = resolveVar("DB_PATH", fileVariables);
-  const allowDbReset = toBooleanFlag(resolveVar("ALLOW_DB_RESET", fileVariables));
+  const env = String(resolveVar("NODE_ENV", fileVariables) ?? "development").trim() || "development";
+  const host = String(resolveVar("HOST", fileVariables) ?? DEFAULTS.HOST).trim() || DEFAULTS.HOST;
+  const port = toPositiveInteger(resolveVar("PORT", fileVariables), Number(DEFAULTS.PORT));
+  const logLevel = String(resolveVar("LOG_LEVEL", fileVariables) ?? DEFAULTS.LOG_LEVEL).trim() || DEFAULTS.LOG_LEVEL;
+  const dbPath = String(resolveVar("DB_PATH", fileVariables) ?? DEFAULTS.DB_PATH).trim() || DEFAULTS.DB_PATH;
+
+  const enableWeb = toBoolean(resolveVar("ENABLE_WEB", fileVariables), toBoolean(DEFAULTS.ENABLE_WEB, true));
+  const enablePing = toBoolean(resolveVar("ENABLE_PING", fileVariables), toBoolean(DEFAULTS.ENABLE_PING, true));
+  const enableDns = toBoolean(resolveVar("ENABLE_DNS", fileVariables), toBoolean(DEFAULTS.ENABLE_DNS, true));
+  const enableHttp = toBoolean(resolveVar("ENABLE_HTTP", fileVariables), toBoolean(DEFAULTS.ENABLE_HTTP, true));
+
+  const pingTargets = toStringList(resolveVar("PING_TARGETS", fileVariables), DEFAULTS.PING_TARGETS.split(","));
+  const pingIntervalMs = toPositiveInteger(
+    resolveVar("PING_INTERVAL_MS", fileVariables) ??
+      Number(resolveVar("PING_INTERVAL_S", fileVariables) ?? DEFAULTS.PING_INTERVAL_S) * 1000,
+    Number(DEFAULTS.PING_INTERVAL_S) * 1000
+  );
+  const pingTimeoutMs = toPositiveInteger(resolveVar("PING_TIMEOUT_MS", fileVariables), Number(DEFAULTS.PING_TIMEOUT_MS));
+  const pingMethod = toMethodPreference(resolveVar("PING_METHOD", fileVariables));
+
+  const dnsHostnames = toStringList(
+    resolveVar("DNS_HOSTNAMES", fileVariables),
+    DEFAULTS.DNS_HOSTNAMES.split(",")
+  );
+  const dnsIntervalS = toPositiveInteger(
+    resolveVar("DNS_INTERVAL_S", fileVariables),
+    Number(DEFAULTS.DNS_INTERVAL_S)
+  );
+  const dnsTimeoutMs = toPositiveInteger(resolveVar("DNS_TIMEOUT_MS", fileVariables), Number(DEFAULTS.DNS_TIMEOUT_MS));
+
+  const httpUrls = toStringList(resolveVar("HTTP_URLS", fileVariables), DEFAULTS.HTTP_URLS.split(","));
+  const httpIntervalS = toPositiveInteger(
+    resolveVar("HTTP_INTERVAL_S", fileVariables),
+    Number(DEFAULTS.HTTP_INTERVAL_S)
+  );
+  const httpTimeoutMs = toPositiveInteger(
+    resolveVar("HTTP_TIMEOUT_MS", fileVariables),
+    Number(DEFAULTS.HTTP_TIMEOUT_MS)
+  );
 
   return {
     env,
-    server: { port },
+    server: { host, port },
     logging: { level: logLevel },
     storage: { dbPath },
-    flags: { allowDbReset },
+    features: {
+      enableWeb,
+      enablePing,
+      enableDns,
+      enableHttp,
+    },
+    ping: {
+      targets: pingTargets,
+      intervalMs: pingIntervalMs,
+      timeoutMs: pingTimeoutMs,
+      methodPreference: pingMethod,
+    },
+    dns: {
+      hostnames: dnsHostnames,
+      intervalS: dnsIntervalS,
+      timeoutMs: dnsTimeoutMs,
+    },
+    http: {
+      urls: httpUrls,
+      intervalS: httpIntervalS,
+      timeoutMs: httpTimeoutMs,
+    },
   };
 }
+

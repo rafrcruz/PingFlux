@@ -215,7 +215,7 @@ export async function measureCycle(hostnames) {
         hostname: row.hostname,
         resolver: row.resolver,
         lookup_ms: row.lookup_ms,
-        success: row.success,
+        success: row.success ? 1 : 0,
       });
     }
   });

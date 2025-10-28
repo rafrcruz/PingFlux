@@ -10,6 +10,8 @@
     "db:init": "node scripts/db-init.js",
     "db:health": "node scripts/db-health.js",
     "db:reset": "node scripts/db-reset.js",
+    "ping:once": "node src/tools/ping-once.js",
+    "ping:loop": "node src/tools/ping-loop.js",
     "dns:once": "node src/tools/dns-once.js",
     "dns:loop": "node src/tools/dns-loop.js",
     "http:once": "node src/tools/http-once.js",
