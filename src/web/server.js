@@ -1,4 +1,5 @@
 import http from "http";
+import { runTraceroute } from "../collectors/traceroute.js";
 
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
@@ -22,6 +23,73 @@ function sendText(res, statusCode, text) {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Content-Length", Buffer.byteLength(body));
   res.end(body);
+}
+
+function readJsonBody(req, maxBytes = 256 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    let settled = false;
+
+    const finish = (error, payload) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (error) {
+        reject(error);
+      } else {
+        resolve(payload);
+      }
+    };
+
+    req.on("data", (chunk) => {
+      if (settled) {
+        return;
+      }
+
+      total += chunk.length;
+      if (total > maxBytes) {
+        finish(new Error("Body too large"));
+        req.destroy();
+        return;
+      }
+
+      chunks.push(chunk);
+    });
+
+    req.on("error", (error) => {
+      finish(error);
+    });
+
+    req.on("aborted", () => {
+      finish(new Error("Request aborted"));
+    });
+
+    req.on("end", () => {
+      if (settled) {
+        return;
+      }
+
+      if (chunks.length === 0) {
+        finish(null, {});
+        return;
+      }
+
+      const raw = Buffer.concat(chunks).toString("utf8").trim();
+      if (!raw) {
+        finish(null, {});
+        return;
+      }
+
+      try {
+        const parsed = JSON.parse(raw);
+        finish(null, parsed && typeof parsed === "object" ? parsed : {});
+      } catch (error) {
+        finish(new Error("Invalid JSON"));
+      }
+    });
+  });
 }
 
 const RANGE_TO_DURATION_MS = {
@@ -167,6 +235,31 @@ function renderIndexHtml() {
         font-size: 1.2rem;
         font-weight: 600;
       }
+
+      .table-container {
+        overflow-x: auto;
+        margin-top: 12px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        padding: 6px 8px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 0.85rem;
+        text-align: left;
+      }
+
+      th {
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 0.75rem;
+        color: rgba(243, 245, 249, 0.7);
+      }
     </style>
   </head>
   <body>
@@ -188,6 +281,7 @@ function renderIndexHtml() {
           </select>
         </label>
         <button type="submit" id="submit">Atualizar</button>
+        <button type="button" id="run-traceroute">Run traceroute</button>
       </form>
       <p class="message" id="message"></p>
       <section class="card">
@@ -208,6 +302,24 @@ function renderIndexHtml() {
           </div>
         </div>
       </section>
+      <section class="card">
+        <h2 style="margin-top:0">Traceroute</h2>
+        <p class="message" id="traceroute-status"></p>
+        <div class="table-container" id="traceroute-table-container">
+          <table id="traceroute-table">
+            <thead>
+              <tr>
+                <th scope="col">#</th>
+                <th scope="col">IP</th>
+                <th scope="col">RTT1 (ms)</th>
+                <th scope="col">RTT2 (ms)</th>
+                <th scope="col">RTT3 (ms)</th>
+              </tr>
+            </thead>
+            <tbody id="traceroute-tbody"></tbody>
+          </table>
+        </div>
+      </section>
     </main>
     <script type="module">
       const APP_CONFIG = ${JSON.stringify(appConfig)};
@@ -225,6 +337,10 @@ function renderIndexHtml() {
       const chartSvg = document.getElementById("chart");
       const summaryLoss = document.getElementById("summary-loss");
       const summaryP95 = document.getElementById("summary-p95");
+      const tracerouteButton = document.getElementById("run-traceroute");
+      const tracerouteStatus = document.getElementById("traceroute-status");
+      const tracerouteTableContainer = document.getElementById("traceroute-table-container");
+      const tracerouteTbody = document.getElementById("traceroute-tbody");
 
       function parseInitialState() {
         const params = new URLSearchParams(window.location.search);
@@ -244,6 +360,73 @@ function renderIndexHtml() {
       function setMessage(text, tone = "info") {
         messageEl.textContent = text || "";
         messageEl.style.color = tone === "error" ? "#f97316" : tone === "muted" ? "rgba(243,245,249,0.7)" : "#facc15";
+      }
+
+      function setTracerouteStatus(text, tone = "info") {
+        tracerouteStatus.textContent = text || "";
+        tracerouteStatus.style.color =
+          tone === "error"
+            ? "#f97316"
+            : tone === "muted"
+            ? "rgba(243,245,249,0.7)"
+            : "#facc15";
+      }
+
+      function formatHopMetric(value) {
+        if (value === null || value === undefined) {
+          return "*";
+        }
+
+        const num = Number(value);
+        if (!Number.isFinite(num)) {
+          return "*";
+        }
+
+        if (num >= 100) {
+          return num.toFixed(0);
+        }
+        if (num >= 10) {
+          return num.toFixed(1);
+        }
+        return num.toFixed(2);
+      }
+
+      function renderTracerouteHops(hops) {
+        tracerouteTbody.innerHTML = "";
+        if (!hops || hops.length === 0) {
+          tracerouteTableContainer.style.display = "none";
+          return;
+        }
+
+        tracerouteTableContainer.style.display = "";
+        const fragment = document.createDocumentFragment();
+        for (const hop of hops) {
+          const row = document.createElement("tr");
+
+          const hopCell = document.createElement("td");
+          hopCell.textContent = hop?.hop ?? "";
+          row.appendChild(hopCell);
+
+          const ipCell = document.createElement("td");
+          ipCell.textContent = hop?.ip || "*";
+          row.appendChild(ipCell);
+
+          const rtt1Cell = document.createElement("td");
+          rtt1Cell.textContent = formatHopMetric(hop?.rtt1_ms);
+          row.appendChild(rtt1Cell);
+
+          const rtt2Cell = document.createElement("td");
+          rtt2Cell.textContent = formatHopMetric(hop?.rtt2_ms);
+          row.appendChild(rtt2Cell);
+
+          const rtt3Cell = document.createElement("td");
+          rtt3Cell.textContent = formatHopMetric(hop?.rtt3_ms);
+          row.appendChild(rtt3Cell);
+
+          fragment.appendChild(row);
+        }
+
+        tracerouteTbody.appendChild(fragment);
       }
 
       function extractTargets(payload) {
@@ -578,6 +761,9 @@ function renderIndexHtml() {
         }
       }
 
+      setTracerouteStatus("Execute um traceroute para ver os hops.", "muted");
+      tracerouteTableContainer.style.display = "none";
+
       const initial = parseInitialState();
       rangeSelect.value = initial.range;
       targetInput.value = initial.target;
@@ -587,6 +773,70 @@ function renderIndexHtml() {
         const range = rangeSelect.value;
         const target = targetInput.value.trim();
         load(range, target);
+      });
+
+      tracerouteButton.addEventListener("click", async () => {
+        const target = targetInput.value.trim();
+        tracerouteButton.disabled = true;
+        setTracerouteStatus("Executando traceroute...", "muted");
+        renderTracerouteHops([]);
+
+        try {
+          const response = await fetch("/actions/traceroute", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target }),
+          });
+
+          if (!response.ok) {
+            let errorMessage = "Falha ao iniciar traceroute.";
+            try {
+              const payload = await response.json();
+              if (payload?.error) {
+                errorMessage = String(payload.error);
+              }
+            } catch (error) {
+              // Ignore body parsing errors.
+            }
+            throw new Error(errorMessage);
+          }
+
+          const actionResult = await response.json();
+          const rawId = actionResult?.id;
+          if (rawId === null || rawId === undefined || rawId === "") {
+            throw new Error("Resposta inválida da ação de traceroute.");
+          }
+
+          const id = String(rawId);
+          setTracerouteStatus("Carregando resultado...", "muted");
+
+          const resultResponse = await fetch("/api/traceroute/" + encodeURIComponent(id));
+          if (!resultResponse.ok) {
+            throw new Error("Falha ao carregar resultado do traceroute.");
+          }
+
+          const resultPayload = await resultResponse.json();
+          const hops = Array.isArray(resultPayload?.hops) ? resultPayload.hops : [];
+          renderTracerouteHops(hops);
+
+          if (!hops.length) {
+            setTracerouteStatus(
+              resultPayload?.success === 1
+                ? "Nenhum hop retornado."
+                : "Traceroute finalizado sem dados.",
+              resultPayload?.success === 1 ? "muted" : "error"
+            );
+          } else if (resultPayload?.success === 1) {
+            setTracerouteStatus("Traceroute concluído.", "muted");
+          } else {
+            setTracerouteStatus("Traceroute finalizado com falha.", "error");
+          }
+        } catch (error) {
+          renderTracerouteHops([]);
+          setTracerouteStatus(error.message || "Falha ao executar traceroute.", "error");
+        } finally {
+          tracerouteButton.disabled = false;
+        }
       });
 
       load(initial.range, initial.target);
@@ -627,10 +877,13 @@ function createRequestHandler(db) {
         httpSamplesByUrl: db.prepare(
           "SELECT ts, url, status, ttfb_ms, total_ms, bytes, success FROM http_sample WHERE ts BETWEEN ? AND ? AND url = ? ORDER BY ts ASC"
         ),
+        tracerouteById: db.prepare(
+          "SELECT id, ts, target, hops_json, success FROM traceroute_run WHERE id = ?"
+        ),
       }
     : null;
 
-  return (req, res) => {
+  return async (req, res) => {
     const { method, url } = req;
     if (!method || !url) {
       sendText(res, 400, "Bad request");
@@ -653,6 +906,42 @@ function createRequestHandler(db) {
         sendJson(res, 200, { status: "ok" });
       } catch (error) {
         sendJson(res, 500, { status: "error", message: error?.message ?? "Unknown" });
+      }
+      return;
+    }
+
+    if (method === "POST" && parsedUrl.pathname === "/actions/traceroute") {
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (error) {
+        const status = error?.message === "Body too large" ? 413 : 400;
+        sendJson(res, status, { error: error?.message ?? "Invalid body" });
+        return;
+      }
+
+      const payload = body && typeof body === "object" ? body : {};
+      const rawTarget = typeof payload.target === "string" ? payload.target.trim() : "";
+      const parsedMaxHops = Number.parseInt(payload.maxHops, 10);
+      const parsedTimeoutMs = Number.parseInt(payload.timeoutMs, 10);
+      const options = {};
+      if (Number.isFinite(parsedMaxHops) && parsedMaxHops > 0) {
+        options.maxHops = parsedMaxHops;
+      }
+      if (Number.isFinite(parsedTimeoutMs) && parsedTimeoutMs > 0) {
+        options.timeoutMs = parsedTimeoutMs;
+      }
+
+      try {
+        const result = await runTraceroute(rawTarget, options);
+        sendJson(res, 200, {
+          id: result.id,
+          ts: result.ts,
+          target: result.target,
+          success: result.success,
+        });
+      } catch (error) {
+        sendJson(res, 500, { error: error?.message ?? "Traceroute failed" });
       }
       return;
     }
@@ -744,6 +1033,51 @@ function createRequestHandler(db) {
         sendJson(res, 500, { error: error?.message ?? "Query failed" });
       }
       return;
+    }
+
+    if (method === "GET") {
+      const tracerouteMatch = /^\/api\/traceroute\/(\d+)$/.exec(parsedUrl.pathname);
+      if (tracerouteMatch) {
+        if (!statements) {
+          sendJson(res, 500, { error: "Database unavailable" });
+          return;
+        }
+
+        const id = Number.parseInt(tracerouteMatch[1], 10);
+        if (!Number.isFinite(id) || id <= 0) {
+          sendJson(res, 400, { error: "Invalid traceroute id" });
+          return;
+        }
+
+        try {
+          const row = statements.tracerouteById.get(id);
+          if (!row) {
+            sendJson(res, 404, { error: "Traceroute not found" });
+            return;
+          }
+
+          let hops = [];
+          try {
+            const parsed = JSON.parse(row.hops_json ?? "[]");
+            if (Array.isArray(parsed)) {
+              hops = parsed;
+            }
+          } catch (error) {
+            hops = [];
+          }
+
+          sendJson(res, 200, {
+            id: row.id,
+            ts: row.ts,
+            target: row.target,
+            success: row.success,
+            hops,
+          });
+        } catch (error) {
+          sendJson(res, 500, { error: error?.message ?? "Query failed" });
+        }
+        return;
+      }
     }
 
     if (method === "GET" && parsedUrl.pathname === "/") {
