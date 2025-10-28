@@ -24,7 +24,47 @@ function sendText(res, statusCode, text) {
   res.end(body);
 }
 
+const RANGE_TO_DURATION_MS = {
+  "1h": 60 * 60 * 1000,
+  "6h": 6 * 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+};
+
+function resolveRangeWindow(rawRange) {
+  const normalized = typeof rawRange === "string" ? rawRange.trim().toLowerCase() : "";
+  const rangeKey = RANGE_TO_DURATION_MS[normalized] ? normalized : "1h";
+  const durationMs = RANGE_TO_DURATION_MS[rangeKey];
+  const nowMs = Date.now();
+  const fromMs = nowMs - durationMs;
+
+  return { fromMs, toMs: nowMs };
+}
+
 function createRequestHandler(db) {
+  const hasDb = db && typeof db.prepare === "function";
+  const statements = hasDb
+    ? {
+        pingWindowAll: db.prepare(
+          "SELECT ts_min, target, sent, received, loss_pct, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? ORDER BY target ASC, ts_min ASC"
+        ),
+        pingWindowByTarget: db.prepare(
+          "SELECT ts_min, target, sent, received, loss_pct, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? AND target = ? ORDER BY ts_min ASC"
+        ),
+        dnsSamplesAll: db.prepare(
+          "SELECT ts, hostname, resolver, lookup_ms, success FROM dns_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
+        ),
+        dnsSamplesByHostname: db.prepare(
+          "SELECT ts, hostname, resolver, lookup_ms, success FROM dns_sample WHERE ts BETWEEN ? AND ? AND hostname = ? ORDER BY ts ASC"
+        ),
+        httpSamplesAll: db.prepare(
+          "SELECT ts, url, status, ttfb_ms, total_ms, bytes, success FROM http_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
+        ),
+        httpSamplesByUrl: db.prepare(
+          "SELECT ts, url, status, ttfb_ms, total_ms, bytes, success FROM http_sample WHERE ts BETWEEN ? AND ? AND url = ? ORDER BY ts ASC"
+        ),
+      }
+    : null;
+
   return (req, res) => {
     const { method, url } = req;
     if (!method || !url) {
@@ -48,6 +88,95 @@ function createRequestHandler(db) {
         sendJson(res, 200, { status: "ok" });
       } catch (error) {
         sendJson(res, 500, { status: "error", message: error?.message ?? "Unknown" });
+      }
+      return;
+    }
+
+    if (method === "GET" && parsedUrl.pathname === "/api/ping/window") {
+      if (!statements) {
+        sendJson(res, 500, { error: "Database unavailable" });
+        return;
+      }
+
+      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
+      const rawTarget = parsedUrl.searchParams.get("target");
+      const target = typeof rawTarget === "string" ? rawTarget.trim() : "";
+
+      try {
+        if (target) {
+          const rows = statements.pingWindowByTarget.all(fromMs, toMs, target);
+          sendJson(res, 200, rows);
+        } else {
+          const rows = statements.pingWindowAll.all(fromMs, toMs);
+          const grouped = Object.create(null);
+          for (const row of rows) {
+            if (!grouped[row.target]) {
+              grouped[row.target] = [];
+            }
+            grouped[row.target].push(row);
+          }
+          sendJson(res, 200, grouped);
+        }
+      } catch (error) {
+        sendJson(res, 500, { error: error?.message ?? "Query failed" });
+      }
+      return;
+    }
+
+    if (method === "GET" && parsedUrl.pathname === "/api/dns") {
+      if (!statements) {
+        sendJson(res, 500, { error: "Database unavailable" });
+        return;
+      }
+
+      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
+      const rawHostname = parsedUrl.searchParams.get("hostname");
+      const hostname = typeof rawHostname === "string" ? rawHostname.trim() : "";
+
+      try {
+        const baseRows = hostname
+          ? statements.dnsSamplesByHostname.all(fromMs, toMs, hostname)
+          : statements.dnsSamplesAll.all(fromMs, toMs);
+        const mapped = baseRows.map((row) => ({
+          ts: row.ts,
+          hostname: row.hostname,
+          resolver: row.resolver,
+          lookup_ms: row.lookup_ms,
+          success: row.success === 1,
+        }));
+        sendJson(res, 200, mapped);
+      } catch (error) {
+        sendJson(res, 500, { error: error?.message ?? "Query failed" });
+      }
+      return;
+    }
+
+    if (method === "GET" && parsedUrl.pathname === "/api/http") {
+      if (!statements) {
+        sendJson(res, 500, { error: "Database unavailable" });
+        return;
+      }
+
+      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
+      const rawUrlParam = parsedUrl.searchParams.get("url");
+      const urlParam = typeof rawUrlParam === "string" ? rawUrlParam.trim() : "";
+
+      try {
+        const baseRows = urlParam
+          ? statements.httpSamplesByUrl.all(fromMs, toMs, urlParam)
+          : statements.httpSamplesAll.all(fromMs, toMs);
+        const mapped = baseRows.map((row) => ({
+          ts: row.ts,
+          url: row.url,
+          status: row.status,
+          ttfb_ms: row.ttfb_ms,
+          total_ms: row.total_ms,
+          bytes: row.bytes,
+          success: row.success === 1,
+        }));
+        sendJson(res, 200, mapped);
+      } catch (error) {
+        sendJson(res, 500, { error: error?.message ?? "Query failed" });
       }
       return;
     }
