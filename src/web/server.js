@@ -103,11 +103,12 @@ const RAW_UI_DEFAULT_RANGE = String(process.env.UI_DEFAULT_RANGE ?? "").trim().t
 const UI_DEFAULT_RANGE = RANGE_OPTIONS.includes(RAW_UI_DEFAULT_RANGE) ? RAW_UI_DEFAULT_RANGE : "1h";
 const UI_DEFAULT_TARGET = String(process.env.UI_DEFAULT_TARGET ?? "").trim();
 
-function renderIndexHtml() {
+function renderIndexHtml(providedConfig) {
   const appConfig = {
-    defaultTarget: UI_DEFAULT_TARGET,
-    defaultRange: UI_DEFAULT_RANGE,
+    defaultTarget: providedConfig?.defaultTarget ?? UI_DEFAULT_TARGET,
+    defaultRange: providedConfig?.defaultRange ?? UI_DEFAULT_RANGE,
     ranges: RANGE_OPTIONS,
+    alerts: providedConfig?.alerts ?? null,
   };
 
   return `<!DOCTYPE html>
@@ -213,6 +214,16 @@ function renderIndexHtml() {
         color: #facc15;
       }
 
+      .alert {
+        margin-top: 16px;
+        padding: 12px 16px;
+        border-radius: 6px;
+        border: 1px solid rgba(250, 204, 21, 0.4);
+        background: rgba(253, 224, 71, 0.1);
+        color: #facc15;
+        font-size: 0.95rem;
+      }
+
       .summary-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -284,6 +295,7 @@ function renderIndexHtml() {
         <button type="button" id="run-traceroute">Run traceroute</button>
       </form>
       <p class="message" id="message"></p>
+      <div class="alert" id="alert-box" role="status" aria-live="polite" style="display:none"></div>
       <section class="card">
         <div class="chart-container">
           <svg id="chart" viewBox="0 0 600 320" role="img" aria-label="Gráfico de RTT"></svg>
@@ -327,6 +339,17 @@ function renderIndexHtml() {
       const RANGE_OPTIONS = APP_CONFIG.ranges;
       const DEFAULT_RANGE = APP_CONFIG.defaultRange || "1h";
       const DEFAULT_TARGET = APP_CONFIG.defaultTarget || "";
+      const ALERT_CONFIG = APP_CONFIG.alerts || {};
+
+      const ALERT_P95_MS = Number.isFinite(Number(ALERT_CONFIG.p95Ms))
+        ? Number(ALERT_CONFIG.p95Ms)
+        : 200;
+      const ALERT_LOSS_PCT = Number.isFinite(Number(ALERT_CONFIG.lossPct))
+        ? Number(ALERT_CONFIG.lossPct)
+        : 1;
+      const ALERT_MIN_POINTS = Number.isFinite(Number(ALERT_CONFIG.minPoints))
+        ? Number(ALERT_CONFIG.minPoints)
+        : 10;
 
       const form = document.getElementById("controls");
       const targetInput = document.getElementById("target");
@@ -334,6 +357,7 @@ function renderIndexHtml() {
       const rangeSelect = document.getElementById("range");
       const submitButton = document.getElementById("submit");
       const messageEl = document.getElementById("message");
+      const alertBox = document.getElementById("alert-box");
       const chartSvg = document.getElementById("chart");
       const summaryLoss = document.getElementById("summary-loss");
       const summaryP95 = document.getElementById("summary-p95");
@@ -460,6 +484,94 @@ function renderIndexHtml() {
         return Number(value).toFixed(digits);
       }
 
+      function formatNumberCompact(value, digits = 2) {
+        if (value === null || value === undefined || Number.isNaN(value)) {
+          return "--";
+        }
+        const fixed = Number(value).toFixed(digits);
+        return fixed.replace(/(\.\d*?[1-9])0+$/u, "$1").replace(/\.0+$/u, "");
+      }
+
+      function computeMetrics(rows) {
+        const list = Array.isArray(rows) ? rows : [];
+        let latestP95 = null;
+        for (let i = list.length - 1; i >= 0; i -= 1) {
+          const value = coerceNumber(list[i]?.p95_ms);
+          if (value !== null) {
+            latestP95 = value;
+            break;
+          }
+        }
+
+        let lossTotal = 0;
+        let lossCount = 0;
+        for (const row of list) {
+          const loss = coerceNumber(row?.loss_pct);
+          if (loss !== null) {
+            lossTotal += loss;
+            lossCount += 1;
+          }
+        }
+
+        const avgLoss = lossCount > 0 ? lossTotal / lossCount : null;
+
+        return {
+          pointsCount: list.length,
+          latestP95,
+          avgLoss,
+        };
+      }
+
+      function hideAlert() {
+        if (!alertBox) {
+          return;
+        }
+        alertBox.style.display = "none";
+        alertBox.textContent = "";
+      }
+
+      function showAlert(text) {
+        if (!alertBox) {
+          return;
+        }
+        alertBox.textContent = text;
+        alertBox.style.display = "block";
+      }
+
+      function updateAlertBox(rows) {
+        if (!alertBox) {
+          return;
+        }
+
+        const { pointsCount, latestP95, avgLoss } = computeMetrics(rows);
+
+        if (pointsCount < ALERT_MIN_POINTS) {
+          hideAlert();
+          return;
+        }
+
+        const triggered = [];
+
+        if (latestP95 !== null && latestP95 > ALERT_P95_MS) {
+          triggered.push(
+            `p95 ${formatNumberCompact(latestP95, 0)} ms (> ${formatNumberCompact(ALERT_P95_MS, 0)} ms)`
+          );
+        }
+
+        if (avgLoss !== null && avgLoss > ALERT_LOSS_PCT) {
+          triggered.push(
+            `perda média ${formatNumberCompact(avgLoss, 2)}% (> ${formatNumberCompact(ALERT_LOSS_PCT, 2)}%)`
+          );
+        }
+
+        if (triggered.length === 0) {
+          hideAlert();
+          return;
+        }
+
+        showAlert(`Alerta: ${triggered.join(" e ")}.`);
+      }
+
       function renderSummary(rows) {
         if (!rows || rows.length === 0) {
           summaryLoss.textContent = "--";
@@ -467,10 +579,7 @@ function renderIndexHtml() {
           return;
         }
 
-        const totalLoss = rows.reduce((acc, row) => acc + (coerceNumber(row.loss_pct) ?? 0), 0);
-        const avgLoss = rows.length > 0 ? totalLoss / rows.length : null;
-        const latest = rows[rows.length - 1];
-        const latestP95 = coerceNumber(latest?.p95_ms);
+        const { avgLoss, latestP95 } = computeMetrics(rows);
 
         summaryLoss.textContent = avgLoss !== null ? formatNumber(avgLoss, 2) : "--";
         summaryP95.textContent = latestP95 !== null ? formatNumber(latestP95, 0) : "--";
@@ -751,11 +860,13 @@ function renderIndexHtml() {
 
           renderChart(rows);
           renderSummary(rows);
+          updateAlertBox(rows);
         } catch (error) {
           console.error(error);
           setMessage(error.message || "Erro ao carregar dados.", "error");
           renderChart([]);
           renderSummary([]);
+          updateAlertBox([]);
         } finally {
           submitButton.disabled = false;
         }
@@ -855,7 +966,7 @@ function resolveRangeWindow(rawRange) {
   return { fromMs, toMs: nowMs };
 }
 
-function createRequestHandler(db) {
+function createRequestHandler(db, appConfig) {
   const hasDb = db && typeof db.prepare === "function";
   const statements = hasDb
     ? {
@@ -1081,7 +1192,7 @@ function createRequestHandler(db) {
     }
 
     if (method === "GET" && parsedUrl.pathname === "/") {
-      sendHtml(res, 200, renderIndexHtml());
+      sendHtml(res, 200, renderIndexHtml(appConfig));
       return;
     }
 
@@ -1089,14 +1200,34 @@ function createRequestHandler(db) {
   };
 }
 
-export async function startServer({ host, port, db, signal, closeTimeoutMs = 1500 }) {
+export async function startServer({
+  host,
+  port,
+  db,
+  signal,
+  config,
+  closeTimeoutMs = 1500,
+}) {
   const parsedPort = Number.parseInt(String(port ?? 3030), 10);
   const listenPort = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3030;
   const providedHost = typeof host === "string" ? host.trim() : "";
   const listenHost = providedHost === "127.0.0.1" ? "127.0.0.1" : "127.0.0.1";
 
+  const appConfig = {
+    defaultTarget: UI_DEFAULT_TARGET,
+    defaultRange: UI_DEFAULT_RANGE,
+    ranges: RANGE_OPTIONS,
+    alerts: config?.alerts
+      ? {
+          p95Ms: config.alerts.p95Ms,
+          lossPct: config.alerts.lossPct,
+          minPoints: config.alerts.minPoints,
+        }
+      : null,
+  };
+
   return new Promise((resolve, reject) => {
-    const server = http.createServer(createRequestHandler(db));
+    const server = http.createServer(createRequestHandler(db, appConfig));
     const sockets = new Set();
     let closeRequested = false;
     let signalHandler = null;

@@ -21,6 +21,9 @@ const DEFAULTS = Object.freeze({
   HTTP_URLS: "https://example.com",
   HTTP_INTERVAL_S: "60",
   HTTP_TIMEOUT_MS: "5000",
+  ALERT_P95_MS: "200",
+  ALERT_LOSS_PCT: "1.0",
+  ALERT_MIN_POINTS: "10",
 });
 
 const QUOTE_TRIM_PATTERN = /^['"]?(.*?)['"]?$/;
@@ -83,6 +86,15 @@ function toInteger(value, fallback) {
 function toPositiveInteger(value, fallback) {
   const parsed = toInteger(value, fallback);
   return parsed > 0 ? parsed : fallback;
+}
+
+function toNumber(value, fallback) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 function toBoolean(value, fallback) {
@@ -170,6 +182,19 @@ export function getConfig() {
     Number(DEFAULTS.HTTP_TIMEOUT_MS)
   );
 
+  const alertP95Ms = toNumber(
+    resolveVar("ALERT_P95_MS", fileVariables),
+    Number(DEFAULTS.ALERT_P95_MS)
+  );
+  const alertLossPct = toNumber(
+    resolveVar("ALERT_LOSS_PCT", fileVariables),
+    Number(DEFAULTS.ALERT_LOSS_PCT)
+  );
+  const alertMinPoints = toPositiveInteger(
+    resolveVar("ALERT_MIN_POINTS", fileVariables),
+    Number(DEFAULTS.ALERT_MIN_POINTS)
+  );
+
   return {
     env,
     server: { host, port },
@@ -196,6 +221,11 @@ export function getConfig() {
       urls: httpUrls,
       intervalS: httpIntervalS,
       timeoutMs: httpTimeoutMs,
+    },
+    alerts: {
+      p95Ms: alertP95Ms,
+      lossPct: alertLossPct,
+      minPoints: alertMinPoints,
     },
   };
 }
