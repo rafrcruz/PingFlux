@@ -232,7 +232,9 @@ function ensureDbReady() {
   }
 }
 
-export async function runLoop() {
+let activeLoopController;
+
+function createLoopController() {
   const settings = getDnsSettings();
   const hostnames = settings.hostnames;
   console.log(
@@ -244,9 +246,9 @@ export async function runLoop() {
   let pendingSleepResolve = null;
   let pendingSleepTimer = null;
 
-  const onSigint = () => {
+  const requestStop = () => {
     if (!stopRequested) {
-      console.log("\n[dns] Caught interrupt, stopping loop...");
+      console.log("[dns] Stop requested.");
       stopRequested = true;
     }
 
@@ -262,41 +264,89 @@ export async function runLoop() {
     }
   };
 
-  process.once("SIGINT", onSigint);
+  const onSignal = (signal) => {
+    console.log(`\n[dns] Caught ${signal}, stopping loop...`);
+    requestStop();
+  };
+
+  const signals = ["SIGINT", "SIGTERM"];
+  for (const signal of signals) {
+    process.on(signal, onSignal);
+  }
+
+  const promise = (async () => {
+    try {
+      while (!stopRequested) {
+        const cycleStart = Date.now();
+        try {
+          const samples = await measureCycle(hostnames);
+          console.log(
+            `[dns] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+          );
+        } catch (error) {
+          console.error("[dns] Cycle error:", error);
+        }
+
+        if (stopRequested) {
+          break;
+        }
+
+        const elapsed = Date.now() - cycleStart;
+        const delay = Math.max(settings.intervalMs - elapsed, 0);
+        if (delay > 0 && !stopRequested) {
+          await new Promise((resolve) => {
+            pendingSleepResolve = resolve;
+            pendingSleepTimer = setTimeout(() => {
+              pendingSleepTimer = null;
+              pendingSleepResolve = null;
+              resolve();
+            }, delay);
+          });
+          pendingSleepTimer = null;
+          pendingSleepResolve = null;
+        }
+      }
+    } finally {
+      for (const signal of signals) {
+        process.removeListener(signal, onSignal);
+      }
+      if (pendingSleepTimer !== null) {
+        clearTimeout(pendingSleepTimer);
+      }
+      pendingSleepTimer = null;
+      pendingSleepResolve = null;
+      console.log("[dns] Loop stopped.");
+    }
+  })();
+
+  return {
+    promise,
+    requestStop,
+  };
+}
+
+export async function runLoop() {
+  if (activeLoopController) {
+    return activeLoopController.promise;
+  }
+
+  activeLoopController = createLoopController();
+  try {
+    await activeLoopController.promise;
+  } finally {
+    activeLoopController = null;
+  }
+}
+
+export async function stop() {
+  if (!activeLoopController) {
+    return;
+  }
 
   try {
-    while (!stopRequested) {
-      const cycleStart = Date.now();
-      try {
-        const samples = await measureCycle(hostnames);
-        console.log(
-          `[dns] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
-        );
-      } catch (error) {
-        console.error("[dns] Cycle error:", error);
-      }
-
-      if (stopRequested) {
-        break;
-      }
-
-      const elapsed = Date.now() - cycleStart;
-      const delay = Math.max(settings.intervalMs - elapsed, 0);
-      if (delay > 0 && !stopRequested) {
-        await new Promise((resolve) => {
-          pendingSleepResolve = resolve;
-          pendingSleepTimer = setTimeout(() => {
-            pendingSleepTimer = null;
-            pendingSleepResolve = null;
-            resolve();
-          }, delay);
-        });
-        pendingSleepTimer = null;
-        pendingSleepResolve = null;
-      }
-    }
-  } finally {
-    process.removeListener("SIGINT", onSigint);
-    console.log("[dns] Loop stopped.");
+    activeLoopController.requestStop();
+    await activeLoopController.promise;
+  } catch (error) {
+    // Suppress shutdown errors to keep callers clean.
   }
 }
