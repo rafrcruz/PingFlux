@@ -12,6 +12,31 @@ let cachedSettings;
 let cachedEnvFileValues;
 let migrationsEnsured = false;
 let activeLoopController = null;
+let currentPingProcess = null;
+
+function terminateChildProcess(child) {
+  if (!child) {
+    return;
+  }
+
+  const pid = child.pid;
+  try {
+    child.kill();
+  } catch (error) {
+    // Ignore kill errors; process may already be gone.
+  }
+
+  if (process.platform === "win32" && pid) {
+    try {
+      const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"]);
+      killer.stdout?.resume();
+      killer.stderr?.resume();
+      killer.unref?.();
+    } catch (error) {
+      // Ignore taskkill errors; best-effort cleanup.
+    }
+  }
+}
 
 function parseEnvFileOnce() {
   if (cachedEnvFileValues) {
@@ -156,21 +181,62 @@ function parseRttFromOutput(output) {
   return null;
 }
 
-function runPing(target, timeoutMs) {
+function runPing(target, timeoutMs, { signal } = {}) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve({ success: false, output: "", aborted: true });
+      return;
+    }
+
     const args = buildPingArgs(target, timeoutMs);
     const child = spawn("ping", args);
+    currentPingProcess = child;
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timeoutTimer = null;
 
-    const timeoutTimer = setTimeout(() => {
+    const cleanup = () => {
+      if (currentPingProcess === child) {
+        currentPingProcess = null;
+      }
+      if (timeoutTimer !== null) {
+        clearTimeout(timeoutTimer);
+      }
+      if (abortHandler && signal) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+    };
+
+    const settle = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+
+    timeoutTimer = setTimeout(() => {
       if (!settled) {
-        settled = true;
-        child.kill("SIGTERM");
-        resolve({ success: false, output: stdout + stderr, timedOut: true });
+        terminateChildProcess(child);
+        settle({ success: false, output: stdout + stderr, timedOut: true });
       }
     }, timeoutMs + 500);
+    timeoutTimer.unref?.();
+
+    const abortHandler = () => {
+      terminateChildProcess(child);
+      settle({ success: false, output: stdout + stderr, aborted: true });
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        abortHandler();
+        return;
+      }
+      signal.addEventListener("abort", abortHandler, { once: true });
+    }
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
@@ -181,26 +247,16 @@ function runPing(target, timeoutMs) {
     });
 
     child.on("error", (error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeoutTimer);
-      resolve({ success: false, output: stdout + stderr, error });
+      settle({ success: false, output: stdout + stderr, error });
     });
 
     child.on("close", (code) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeoutTimer);
-      resolve({ success: code === 0, output: stdout + stderr, code });
+      settle({ success: code === 0, output: stdout + stderr, code });
     });
   });
 }
 
-export async function measureOnce(target) {
+export async function measureOnce(target, { signal } = {}) {
   ensureDbReady();
   const settings = getPingSettings();
   const trimmedTarget = String(target ?? "").trim();
@@ -217,7 +273,7 @@ export async function measureOnce(target) {
     return sample;
   }
 
-  const result = await runPing(trimmedTarget, settings.timeoutMs);
+  const result = await runPing(trimmedTarget, settings.timeoutMs, { signal });
   if (result.success) {
     sample.success = 1;
     sample.rtt_ms = parseRttFromOutput(result.output);
@@ -229,7 +285,7 @@ export async function measureOnce(target) {
   return sample;
 }
 
-export async function measureCycle(targets) {
+export async function measureCycle(targets, { signal } = {}) {
   ensureDbReady();
   const providedList = Array.isArray(targets) ? targets : getPingSettings().targets;
   const list = providedList
@@ -239,8 +295,11 @@ export async function measureCycle(targets) {
   const samples = [];
 
   for (const target of list) {
+    if (signal?.aborted) {
+      break;
+    }
     try {
-      const sample = await measureOnce(target);
+      const sample = await measureOnce(target, { signal });
       samples.push(sample);
     } catch (error) {
       samples.push({
@@ -279,7 +338,7 @@ export async function measureCycle(targets) {
   return samples;
 }
 
-function createLoopController() {
+function createLoopController({ signal } = {}) {
   const settings = getPingSettings();
   const targets = settings.targets;
   console.log(
@@ -292,6 +351,8 @@ function createLoopController() {
   let stopRequested = false;
   let pendingSleepResolve = null;
   let pendingSleepTimer = null;
+  const loopAbortController = new AbortController();
+  const loopSignal = loopAbortController.signal;
 
   const requestStop = () => {
     if (!stopRequested) {
@@ -309,16 +370,27 @@ function createLoopController() {
       pendingSleepResolve = null;
       resolve();
     }
+
+    if (currentPingProcess) {
+      terminateChildProcess(currentPingProcess);
+    }
+
+    if (!loopAbortController.signal.aborted) {
+      loopAbortController.abort();
+    }
   };
 
-  const onSignal = (signal) => {
-    console.log(`\n[ping] Caught ${signal}, stopping loop...`);
+  const abortHandler = () => {
+    console.log("[ping] Abort signal received, stopping loop...");
     requestStop();
   };
 
-  const signals = ["SIGINT", "SIGTERM"];
-  for (const signal of signals) {
-    process.on(signal, onSignal);
+  if (signal) {
+    if (signal.aborted) {
+      abortHandler();
+    } else {
+      signal.addEventListener("abort", abortHandler);
+    }
   }
 
   const promise = (async () => {
@@ -326,7 +398,7 @@ function createLoopController() {
       while (!stopRequested) {
         const cycleStart = Date.now();
         try {
-          const samples = await measureCycle(targets);
+          const samples = await measureCycle(targets, { signal: loopSignal });
           console.log(
             `[ping] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
           );
@@ -351,34 +423,38 @@ function createLoopController() {
           });
         }
       }
-    } finally {
-      for (const signal of signals) {
-        process.removeListener(signal, onSignal);
-      }
-      if (pendingSleepTimer !== null) {
-        clearTimeout(pendingSleepTimer);
-      }
-      pendingSleepTimer = null;
-      pendingSleepResolve = null;
-      console.log("[ping] Loop stopped.");
+      } finally {
+        if (pendingSleepTimer !== null) {
+          clearTimeout(pendingSleepTimer);
+        }
+        pendingSleepTimer = null;
+        pendingSleepResolve = null;
+        console.log("[ping] Loop stopped.");
     }
   })();
 
   return {
     promise,
     requestStop,
+    cleanup: () => {
+      if (signal) {
+        signal.removeEventListener("abort", abortHandler);
+      }
+    },
   };
 }
 
-export async function runLoop() {
+export async function runLoop(options = {}) {
+  const { signal } = options ?? {};
   if (activeLoopController) {
     return activeLoopController.promise;
   }
 
-  activeLoopController = createLoopController();
+  activeLoopController = createLoopController({ signal });
   try {
     await activeLoopController.promise;
   } finally {
+    activeLoopController.cleanup?.();
     activeLoopController = null;
   }
 }

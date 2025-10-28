@@ -12,6 +12,7 @@
     "db:reset": "node scripts/db-reset.js",
     "ping:once": "node src/tools/ping-once.js",
     "ping:loop": "node src/tools/ping-loop.js",
+    "ping:aggregate": "node src/tools/ping-aggregate.js",
     "dns:once": "node src/tools/dns-once.js",
     "dns:loop": "node src/tools/dns-loop.js",
     "http:once": "node src/tools/http-once.js",

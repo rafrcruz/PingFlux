@@ -61,7 +61,7 @@ function createRequestHandler(db) {
   };
 }
 
-export async function startServer({ host, port, db }) {
+export async function startServer({ host, port, db, signal, closeTimeoutMs = 1500 }) {
   const parsedPort = Number.parseInt(String(port ?? 3030), 10);
   const listenPort = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3030;
   const providedHost = typeof host === "string" ? host.trim() : "";
@@ -69,25 +69,86 @@ export async function startServer({ host, port, db }) {
 
   return new Promise((resolve, reject) => {
     const server = http.createServer(createRequestHandler(db));
+    const sockets = new Set();
+    let closeRequested = false;
+    let signalHandler = null;
+    let exportedClose = null;
+    let settled = false;
 
-    const onError = (error) => {
-      server.removeListener("listening", onListening);
+    const finishResolve = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(value);
+    };
+
+    const finishReject = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
       reject(error);
     };
 
+    const onError = (error) => {
+      server.removeListener("listening", onListening);
+      finishReject(error);
+    };
+
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => {
+        sockets.delete(socket);
+      });
+    });
+
     const onListening = () => {
       server.removeListener("error", onError);
-      resolve({
-        close: () =>
-          new Promise((resolveClose, rejectClose) => {
-            server.close((err) => {
-              if (err) {
-                rejectClose(err);
-              } else {
-                resolveClose();
+      const close = () => {
+        if (closeRequested) {
+          return Promise.resolve();
+        }
+        closeRequested = true;
+
+        return new Promise((resolveClose, rejectClose) => {
+          let completed = false;
+
+          const timeout = setTimeout(() => {
+            if (completed) {
+              return;
+            }
+            completed = true;
+            for (const socket of sockets) {
+              try {
+                socket.destroy();
+              } catch (error) {
+                // Ignore socket destroy errors during forced shutdown.
               }
-            });
-          }),
+            }
+            resolveClose();
+          }, closeTimeoutMs);
+          timeout.unref?.();
+
+          server.close((err) => {
+            if (completed) {
+              return;
+            }
+            completed = true;
+            clearTimeout(timeout);
+            if (err) {
+              rejectClose(err);
+            } else {
+              resolveClose();
+            }
+          });
+        });
+      };
+
+      exportedClose = close;
+
+      finishResolve({
+        close,
         server,
       });
     };
@@ -95,5 +156,30 @@ export async function startServer({ host, port, db }) {
     server.once("error", onError);
     server.once("listening", onListening);
     server.listen(listenPort, listenHost);
+
+    if (signal) {
+      const handleAbort = () => {
+        if (exportedClose) {
+          exportedClose().catch(() => {});
+        } else {
+          closeRequested = true;
+          server.close(() => {});
+          finishReject(new Error("Server shutdown requested before start"));
+        }
+      };
+
+      if (signal.aborted) {
+        handleAbort();
+      } else {
+        signalHandler = handleAbort;
+        signal.addEventListener("abort", signalHandler);
+      }
+    }
+
+    server.once("close", () => {
+      if (signal && signalHandler) {
+        signal.removeEventListener("abort", signalHandler);
+      }
+    });
   });
 }
