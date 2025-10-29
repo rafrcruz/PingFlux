@@ -1,10 +1,12 @@
 const DEFAULT_TOOLTIPS = Object.freeze({
-  pingP95: "p95: 95% das amostras tiveram RTT menor ou igual a este valor; bom para ver picos.",
-  pingAvg: "RTT médio: tempo médio de resposta no último minuto.",
-  pingLoss: "Perda: % de pacotes que não retornaram no período.",
-  pingAvailability: "Disponibilidade: estimativa de 100 - perda; quanto maior, melhor.",
-  dnsLookup: "DNS lookup (1m): tempo médio de resolução DNS no último minuto.",
-  httpTtfb: "TTFB (1m): tempo médio até o primeiro byte nas verificações HTTP.",
+  pingP95: "RTT p95: 95% das amostras ficaram abaixo deste valor.",
+  pingP50: "RTT p50: mediana do RTT para o alvo no último minuto.",
+  pingAvg: "RTT médio no último minuto.",
+  pingLoss: "Perda de pacotes no último minuto.",
+  pingAvailability: "Disponibilidade estimada: 100 - perda (quanto maior, melhor).",
+  dnsLookup: "Tempo médio de resolução DNS no último minuto.",
+  httpTtfb: "TTFB médio (1m): tempo até o primeiro byte nas verificações HTTP.",
+  httpTotal: "Tempo total médio (1m) das verificações HTTP.",
 });
 
 function serializeConfig(config) {
@@ -16,9 +18,14 @@ function serializeConfig(config) {
     .replace(/\u2029/g, "\\u2029");
 }
 
-function resolveSparklineMinutes(configMinutes) {
-  const minutes = Number.parseInt(configMinutes, 10);
-  return Number.isFinite(minutes) && minutes > 0 ? minutes : 15;
+function resolveRangeOptions(config) {
+  const defaults = [5, 10, 15, 30];
+  const provided = Array.isArray(config?.rangeOptions) ? config.rangeOptions : [];
+  const values = provided
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const merged = [...new Set([...defaults, ...values])].sort((a, b) => a - b);
+  return merged.length ? merged : defaults;
 }
 
 export function renderIndexPage(uiConfig, options = {}) {
@@ -26,786 +33,322 @@ export function renderIndexPage(uiConfig, options = {}) {
   const tooltips = options.tooltips && typeof options.tooltips === "object"
     ? { ...DEFAULT_TOOLTIPS, ...options.tooltips }
     : DEFAULT_TOOLTIPS;
-  const sparklineMinutes = resolveSparklineMinutes(resolvedConfig.sparklineMinutes);
-  const encodedConfig = serializeConfig(resolvedConfig);
+  const encodedConfig = serializeConfig({
+    ...resolvedConfig,
+    rangeOptions: resolveRangeOptions(resolvedConfig),
+  });
+  const encodedTooltips = serializeConfig(tooltips);
+
+  const themeBootstrap = `(()=>{try{const t=localStorage.getItem('pingflux-theme')==='light'?'light':'dark';document.documentElement.dataset.theme=t;document.documentElement.classList.add('theme-'+t);}catch(e){document.documentElement.dataset.theme='dark';document.documentElement.classList.add('theme-dark');}})();`;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PingFlux · Live</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        line-height: 1.45;
-        background-color: #0b1120;
-      }
-
-      body {
-        margin: 0;
-        padding: 0;
-        background: radial-gradient(circle at top, rgba(56, 189, 248, 0.08), transparent 55%), #0b1120;
-        color: #e2e8f0;
-      }
-
-      main {
-        max-width: 1180px;
-        margin: 0 auto;
-        padding: 32px 20px 64px;
-        display: flex;
-        flex-direction: column;
-        gap: 24px;
-      }
-
-      header {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: space-between;
-        gap: 16px;
-        align-items: flex-end;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: clamp(2rem, 3vw, 2.6rem);
-        font-weight: 600;
-        letter-spacing: -0.02em;
-      }
-
-      .subtitle {
-        margin: 4px 0 0;
-        color: rgba(148, 163, 184, 0.9);
-        font-size: 0.95rem;
-      }
-
-      .status-panel {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        align-items: flex-end;
-        min-width: 200px;
-      }
-
-      .status {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 12px;
-        border-radius: 999px;
-        font-size: 0.82rem;
-        font-weight: 500;
-        border: 1px solid rgba(34, 197, 94, 0.4);
-        background: rgba(34, 197, 94, 0.12);
-        color: #34d399;
-        transition: all 0.2s ease;
-      }
-
-      .status.connecting {
-        border-color: rgba(59, 130, 246, 0.4);
-        background: rgba(59, 130, 246, 0.12);
-        color: #60a5fa;
-      }
-
-      .status.reconnecting {
-        border-color: rgba(250, 204, 21, 0.5);
-        background: rgba(250, 204, 21, 0.12);
-        color: #facc15;
-      }
-
-      .last-update {
-        font-size: 0.85rem;
-        color: #94a3b8;
-      }
-
-      .controls {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 16px;
-        align-items: flex-end;
-      }
-
-      label {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        font-size: 0.85rem;
-        color: #94a3b8;
-      }
-
-      select {
-        appearance: none;
-        padding: 8px 12px;
-        border-radius: 8px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: rgba(15, 23, 42, 0.9);
-        color: inherit;
-        font-size: 0.95rem;
-        min-width: 170px;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-      }
-
-      select:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
-      }
-
-      .kpi-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 16px;
-      }
-
-      .kpi-card {
-        background: rgba(15, 23, 42, 0.82);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 14px;
-        padding: 16px;
-        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
-        transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
-      }
-
-      .kpi-card.warn {
-        border-color: rgba(250, 204, 21, 0.9);
-        background: rgba(250, 204, 21, 0.08);
-      }
-
-      .kpi-card.crit {
-        border-color: rgba(239, 68, 68, 0.95);
-        background: rgba(239, 68, 68, 0.1);
-      }
-
-      .kpi-label {
-        font-size: 0.82rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: rgba(148, 163, 184, 0.85);
-      }
-
-      .kpi-value {
-        margin-top: 10px;
-        font-size: clamp(1.7rem, 3vw, 2.3rem);
-        font-weight: 600;
-        color: #f8fafc;
-      }
-
-      .section-card {
-        background: rgba(15, 23, 42, 0.82);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 16px;
-        padding: 20px;
-        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
-      }
-
-      .section-header {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-        margin-bottom: 12px;
-      }
-
-      .section-header h2 {
-        margin: 0;
-        font-size: 1.2rem;
-        font-weight: 600;
-      }
-
-      .sparkline-chart {
-        position: relative;
-        width: 100%;
-        height: 160px;
-      }
-
-      #sparkline {
-        width: 100%;
-        height: 100%;
-        display: block;
-      }
-
-      #sparkline-empty {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #94a3b8;
-        font-size: 0.95rem;
-      }
-
-      .sparkline-legend {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 16px;
-        font-size: 0.78rem;
-        color: #94a3b8;
-        margin-top: 12px;
-      }
-
-      .legend-item {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-      }
-
-      .legend-dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-        display: inline-block;
-      }
-
-      .legend-dot.avg {
-        background: #38bdf8;
-      }
-
-      .legend-dot.p95 {
-        background: #34d399;
-      }
-
-      @media (max-width: 640px) {
-        .status-panel {
-          align-items: flex-start;
-        }
-
-        .kpi-grid {
-          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        }
-
-        .kpi-value {
-          font-size: 1.8rem;
-        }
-      }
-    </style>
+    <title>PingFlux · Observabilidade em tempo real</title>
+    <meta name="theme-color" content="#0b1120" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+    <script>${themeBootstrap}</script>
+    <link rel="stylesheet" href="/public/dashboard.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script type="module" defer src="/public/dashboard.js"></script>
   </head>
   <body>
-    <main>
-      <header>
-        <div>
-          <h1>PingFlux</h1>
-          <p class="subtitle">Dashboard de latência em tempo real.</p>
+    <div class="page-shell">
+      <header class="app-header" role="banner">
+        <div class="brand" aria-label="PingFlux">
+          <span class="brand-icon" aria-hidden="true">
+            <svg viewBox="0 0 64 64" focusable="false">
+              <path d="M8 34c6 0 6-18 12-18s6 32 12 32 6-44 12-44 6 38 12 38" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <div class="brand-text">
+            <span class="brand-title">PingFlux</span>
+            <span class="brand-subtitle">Live Network Intelligence</span>
+          </div>
         </div>
-        <div class="status-panel">
-          <span id="connection-status" class="status connecting" role="status" aria-live="polite">Conectando…</span>
-          <span class="last-update">Última atualização: <strong id="last-update">—</strong></span>
+        <div class="header-actions">
+          <button id="themeToggle" class="toggle-theme" aria-label="Alternar tema" aria-live="polite">
+            <span class="icon moon" aria-hidden="true"></span>
+            <span class="icon sun" aria-hidden="true"></span>
+          </button>
+          <div class="live-indicator" role="status" aria-live="polite">
+            <span id="connectionDot" class="status-dot status-dot--connecting" aria-hidden="true"></span>
+            <span id="connectionText">Conectando…</span>
+          </div>
+          <time id="lastUpdate" class="last-update" datetime="">Última atualização: —</time>
         </div>
       </header>
 
-      <section class="controls" aria-label="Controles do dashboard">
-        <label>
-          Target
-          <select id="target-select" name="target" disabled>
-            <option value="" disabled selected>Carregando…</option>
-          </select>
+      <section class="controls" role="region" aria-label="Controles do dashboard">
+        <label class="control select-control">
+          <span class="control-label">Alvo de ping</span>
+          <select id="targetSelect" aria-label="Selecionar alvo de ping" disabled></select>
         </label>
-        <label>
-          Range visual
-          <select id="range-select" name="range"></select>
-        </label>
+        <div class="control range-control" role="group" aria-label="Janela visual">
+          <span class="control-label">Janela visual</span>
+          <div id="rangeButtons" class="range-buttons" role="group"></div>
+        </div>
+        <button id="pauseStream" class="control ghost-button" aria-pressed="false">Pausar stream</button>
       </section>
 
-      <section class="kpi-grid" aria-live="polite">
-        <div class="kpi-card" data-kpi="ping-p95" title="${tooltips.pingP95}">
-          <span class="kpi-label">RTT p95 (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="ping-avg" title="${tooltips.pingAvg}">
-          <span class="kpi-label">RTT médio (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="ping-loss" title="${tooltips.pingLoss}">
-          <span class="kpi-label">Perda (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="ping-availability" title="${tooltips.pingAvailability}">
-          <span class="kpi-label">Disponibilidade (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="dns-lookup" title="${tooltips.dnsLookup}">
-          <span class="kpi-label">DNS lookup (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="http-ttfb" title="${tooltips.httpTtfb}">
-          <span class="kpi-label">TTFB (1m)</span>
-          <span class="kpi-value">—</span>
+      <section class="kpi-section" aria-label="Indicadores principais">
+        <div class="kpi-grid">
+          <article class="kpi-card" data-kpi="ping-p95">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 19h16M4 14l4-4 4 4 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">RTT p95 (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingP95" aria-label="Ajuda RTT p95">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-p95">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-p95">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="ping-p50">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 17l6-6 4 4 6-10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">RTT p50 (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingP50" aria-label="Ajuda RTT p50">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-p50">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-p50">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="ping-avg">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 13l4-6 4 3 4-7 4 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">RTT médio (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingAvg" aria-label="Ajuda RTT médio">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-avg">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-avg">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="ping-loss">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M19 5l-7 14-4-7-5 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">Perda (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingLoss" aria-label="Ajuda perda">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-loss">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-loss">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="ping-availability">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2v4m0 12v4m-8-8h4m8 0h4m-3.5-6.5l-2.8 2.8M8.3 8.3L5.5 5.5m0 12.9l2.8-2.8m8.9 0l2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">Disponibilidade (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingAvailability" aria-label="Ajuda disponibilidade">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-availability">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-availability">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="dns-lookup">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M3 5h8v6H3zm10 0h8v6h-8zM3 13h8v6H3zm10 6v-6h8v6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">DNS lookup (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="dnsLookup" aria-label="Ajuda DNS">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="dns-lookup">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="dns-lookup">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="http-ttfb">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M5 12h14M12 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">TTFB (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="httpTtfb" aria-label="Ajuda TTFB">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="http-ttfb">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="http-ttfb">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="http-total">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 4h7l3 6h6l-3 10H6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">HTTP total (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="httpTotal" aria-label="Ajuda tempo total">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="http-total">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="http-total">Sem dados</span>
+            </div>
+          </article>
         </div>
       </section>
 
-      <section class="section-card" aria-label="Tendência das métricas">
-        <div class="section-header">
-          <h2>Tendência (média × p95)</h2>
-          <span class="last-update" id="sparkline-range-label">Últimos ${sparklineMinutes} minutos</span>
-        </div>
-        <div class="sparkline-chart">
-          <svg id="sparkline" viewBox="0 0 600 160" role="img" aria-label="Série histórica do alvo selecionado"></svg>
-          <div id="sparkline-empty">Sem dados suficientes.</div>
-        </div>
-        <div class="sparkline-legend">
-          <span class="legend-item"><span class="legend-dot avg"></span>Média (1m)</span>
-          <span class="legend-item"><span class="legend-dot p95"></span>P95 (1m)</span>
-        </div>
-      </section>
-    </main>
+      <main class="dashboard-grid" id="dashboardRoot">
+        <section class="panel panel-large" aria-label="Séries temporais de ping">
+          <div class="panel-header">
+            <h2>Latência e perda</h2>
+            <div class="panel-actions">
+              <label class="checkbox">
+                <input type="checkbox" id="lossToggle" checked aria-label="Alternar série de perda" />
+                <span>Exibir perda (%)</span>
+              </label>
+              <button id="resetZoom" class="ghost-button" type="button">Reset zoom</button>
+            </div>
+          </div>
+          <div id="latencyChart" class="chart chart-large" role="img" aria-label="Gráfico de RTT"></div>
+        </section>
 
-    <script type="module">
-      const UI_CONFIG = ${encodedConfig};
-      const TOOLTIP_EMPTY = "Sem dados no período.";
+        <section class="panel panel-medium" aria-label="Heatmap RTT">
+          <div class="panel-header">
+            <h2>Heatmap RTT p95</h2>
+          </div>
+          <div id="heatmapChart" class="chart chart-medium" role="img" aria-label="Heatmap RTT"></div>
+        </section>
 
-      const rangeOptions = Array.isArray(UI_CONFIG.rangeOptions) && UI_CONFIG.rangeOptions.length
-        ? [...new Set(UI_CONFIG.rangeOptions.map((value) => Number.parseInt(value, 10)).filter((value) => Number.isFinite(value)))]
-            .sort((a, b) => a - b)
-        : [5, 10, 15];
-      const maxHistoryMinutes = rangeOptions[rangeOptions.length - 1] ?? 15;
-      const historyWindowMs = maxHistoryMinutes * 60 * 1000;
+        <section class="panel panel-gauge" aria-label="Disponibilidade">
+          <div class="panel-header">
+            <h2>Disponibilidade (1m)</h2>
+          </div>
+          <div id="availabilityGauge" class="chart chart-gauge" role="img" aria-label="Gauge de disponibilidade"></div>
+        </section>
 
-      const state = {
-        target: "",
-        rangeMinutes: rangeOptions.includes(Number(UI_CONFIG.sparklineMinutes))
-          ? Number(UI_CONFIG.sparklineMinutes)
-          : rangeOptions[rangeOptions.length - 1],
-      };
+        <section class="panel panel-mini" aria-label="DNS Lookup">
+          <div class="panel-header">
+            <h2>DNS Lookup</h2>
+            <span class="panel-subtitle">Últimos 60 min</span>
+          </div>
+          <div id="dnsSparkline" class="chart chart-mini" role="img" aria-label="Série de lookup DNS"></div>
+        </section>
 
-      const targetSelect = document.getElementById("target-select");
-      const rangeSelect = document.getElementById("range-select");
-      const statusBadge = document.getElementById("connection-status");
-      const lastUpdateEl = document.getElementById("last-update");
-      const sparklineSvg = document.getElementById("sparkline");
-      const sparklineEmpty = document.getElementById("sparkline-empty");
-      const sparklineRangeLabel = document.getElementById("sparkline-range-label");
+        <section class="panel panel-mini" aria-label="HTTP TTFB">
+          <div class="panel-header">
+            <h2>HTTP TTFB</h2>
+            <span class="panel-subtitle">Últimos 60 min</span>
+          </div>
+          <div id="httpTtfbSparkline" class="chart chart-mini" role="img" aria-label="Série de TTFB"></div>
+        </section>
 
-      const kpiDefs = {
-        pingP95: {
-          card: document.querySelector('[data-kpi="ping-p95"]'),
-          value: document.querySelector('[data-kpi="ping-p95"] .kpi-value'),
-          tooltip: "${tooltips.pingP95}",
-          thresholdKey: "p95",
-          format: formatMs,
-        },
-        pingAvg: {
-          card: document.querySelector('[data-kpi="ping-avg"]'),
-          value: document.querySelector('[data-kpi="ping-avg"] .kpi-value'),
-          tooltip: "${tooltips.pingAvg}",
-          thresholdKey: null,
-          format: formatMs,
-        },
-        pingLoss: {
-          card: document.querySelector('[data-kpi="ping-loss"]'),
-          value: document.querySelector('[data-kpi="ping-loss"] .kpi-value'),
-          tooltip: "${tooltips.pingLoss}",
-          thresholdKey: "loss",
-          format: formatPct,
-        },
-        pingAvailability: {
-          card: document.querySelector('[data-kpi="ping-availability"]'),
-          value: document.querySelector('[data-kpi="ping-availability"] .kpi-value'),
-          tooltip: "${tooltips.pingAvailability}",
-          thresholdKey: "loss",
-          format: formatPct,
-        },
-        dnsLookup: {
-          card: document.querySelector('[data-kpi="dns-lookup"]'),
-          value: document.querySelector('[data-kpi="dns-lookup"] .kpi-value'),
-          tooltip: "${tooltips.dnsLookup}",
-          thresholdKey: "dns",
-          format: formatMs,
-        },
-        httpTtfb: {
-          card: document.querySelector('[data-kpi="http-ttfb"]'),
-          value: document.querySelector('[data-kpi="http-ttfb"] .kpi-value'),
-          tooltip: "${tooltips.httpTtfb}",
-          thresholdKey: "ttfb",
-          format: formatMs,
-        },
-      };
+        <section class="panel panel-mini" aria-label="HTTP Tempo total">
+          <div class="panel-header">
+            <h2>HTTP Tempo total</h2>
+            <span class="panel-subtitle">Últimos 60 min</span>
+          </div>
+          <div id="httpTotalSparkline" class="chart chart-mini" role="img" aria-label="Série de tempo total HTTP"></div>
+        </section>
 
-      const thresholds = UI_CONFIG.thresholds ?? {};
-      const history = new Map();
-      let latestPayload = null;
-      let eventSource = null;
-      let reconnectTimer = null;
-      let lastUpdateFormatter = null;
+        <section class="panel panel-events" aria-label="Eventos e alertas">
+          <div class="panel-header">
+            <h2>Eventos recentes</h2>
+          </div>
+          <ul id="eventList" class="event-list" aria-live="polite"></ul>
+        </section>
 
-      function formatMs(value) {
-        if (!Number.isFinite(value)) {
-          return "—";
-        }
-        if (Math.abs(value) >= 100) {
-          return `${Math.round(value)} ms`;
-        }
-        if (Math.abs(value) >= 10) {
-          return `${value.toFixed(1)} ms`;
-        }
-        return `${value.toFixed(2)} ms`;
-      }
+        <section class="panel panel-traceroute" aria-label="Último traceroute">
+          <div class="panel-header">
+            <div>
+              <h2>Último traceroute</h2>
+              <span class="panel-subtitle" id="tracerouteMeta">Sem execuções</span>
+            </div>
+            <button id="tracerouteTrigger" class="primary-button" type="button">Rodar novamente</button>
+          </div>
+          <div id="tracerouteTimeline" class="traceroute-timeline" role="list"></div>
+        </section>
+      </main>
+    </div>
 
-      function formatPct(value) {
-        if (!Number.isFinite(value)) {
-          return "—";
-        }
-        if (Math.abs(value) >= 10) {
-          return `${value.toFixed(1)} %`;
-        }
-        return `${value.toFixed(2)} %`;
-      }
-
-      function normalizeNumber(value) {
-        const num = Number(value);
-        return Number.isFinite(num) ? num : null;
-      }
-
-      function ensureFormatter() {
-        if (!lastUpdateFormatter) {
-          lastUpdateFormatter = new Intl.DateTimeFormat("pt-BR", {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          });
-        }
-        return lastUpdateFormatter;
-      }
-
-      function updateRangeSelect() {
-        rangeSelect.innerHTML = "";
-        for (const minutes of rangeOptions) {
-          const option = document.createElement("option");
-          option.value = String(minutes);
-          option.textContent = `${minutes} min`;
-          if (minutes === state.rangeMinutes) {
-            option.selected = true;
-          }
-          rangeSelect.appendChild(option);
-        }
-        sparklineRangeLabel.textContent = `Últimos ${state.rangeMinutes} minutos`;
-      }
-
-      function applyThreshold(card, compareValue, thresholdKey) {
-        card.classList.remove("warn", "crit");
-        if (!thresholdKey) {
-          return;
-        }
-        const config = thresholds[thresholdKey];
-        if (!config) {
-          return;
-        }
-        if (!Number.isFinite(compareValue)) {
-          return;
-        }
-        const { warn, crit } = config;
-        if (Number.isFinite(crit) && compareValue >= crit) {
-          card.classList.add("crit");
-        } else if (Number.isFinite(warn) && compareValue >= warn) {
-          card.classList.add("warn");
-        }
-      }
-
-      function updateMetric(key, value, compareValue = value) {
-        const def = kpiDefs[key];
-        if (!def) {
-          return;
-        }
-        const hasValue = Number.isFinite(value);
-        def.value.textContent = hasValue ? def.format(value) : "—";
-        def.card.setAttribute("title", hasValue ? def.tooltip : TOOLTIP_EMPTY);
-        applyThreshold(def.card, Number.isFinite(compareValue) ? compareValue : NaN, def.thresholdKey);
-      }
-
-      function updatePingMetrics(metrics) {
-        const win1m = metrics?.win1m ?? {};
-        const p95 = normalizeNumber(win1m.p95_ms);
-        const avg = normalizeNumber(win1m.avg_ms);
-        const loss = normalizeNumber(win1m.loss_pct);
-        const availability = loss === null ? null : Math.max(0, Math.min(100, 100 - loss));
-
-        updateMetric("pingP95", p95);
-        updateMetric("pingAvg", avg);
-        updateMetric("pingLoss", loss);
-        updateMetric("pingAvailability", availability, loss ?? NaN);
-      }
-
-      function updateAggregates(payload) {
-        const dnsAvg = normalizeNumber(payload?.dns?.aggregate?.win1m_avg_ms);
-        updateMetric("dnsLookup", dnsAvg);
-
-        const ttfbAvg = normalizeNumber(payload?.http?.aggregate?.ttfb?.win1m_avg_ms);
-        updateMetric("httpTtfb", ttfbAvg);
-      }
-
-      function pruneHistory(buffer, cutoff) {
-        while (buffer.length && buffer[0].ts < cutoff) {
-          buffer.shift();
-        }
-      }
-
-      function updateHistory(payload) {
-        const timestamp = Number(payload?.ts);
-        const baseTs = Number.isFinite(timestamp) ? timestamp : Date.now();
-        const cutoff = baseTs - historyWindowMs;
-
-        const ping = payload?.ping ?? {};
-        for (const [target, targetMetrics] of Object.entries(ping)) {
-          const win1m = targetMetrics?.win1m ?? {};
-          const entry = {
-            ts: baseTs,
-            avg: normalizeNumber(win1m.avg_ms),
-            p95: normalizeNumber(win1m.p95_ms),
-          };
-          let buffer = history.get(target);
-          if (!buffer) {
-            buffer = [];
-            history.set(target, buffer);
-          }
-          buffer.push(entry);
-          pruneHistory(buffer, cutoff);
-        }
-
-        for (const [target, buffer] of history.entries()) {
-          if (!ping[target]) {
-            pruneHistory(buffer, cutoff);
-          }
-        }
-      }
-
-      function renderSparkline(target) {
-        sparklineSvg.innerHTML = "";
-        if (!target) {
-          sparklineEmpty.style.display = "flex";
-          sparklineSvg.setAttribute("aria-hidden", "true");
-          return;
-        }
-
-        const now = Date.now();
-        const cutoff = now - state.rangeMinutes * 60 * 1000;
-        const buffer = history.get(target) || [];
-        const points = buffer.filter((entry) => entry.ts >= cutoff);
-
-        const values = [];
-        for (const entry of points) {
-          if (Number.isFinite(entry.avg)) {
-            values.push(entry.avg);
-          }
-          if (Number.isFinite(entry.p95)) {
-            values.push(entry.p95);
-          }
-        }
-
-        if (!points.length || !values.length) {
-          sparklineEmpty.style.display = "flex";
-          sparklineSvg.setAttribute("aria-hidden", "true");
-          return;
-        }
-
-        sparklineEmpty.style.display = "none";
-        sparklineSvg.setAttribute("aria-hidden", "false");
-        sparklineSvg.setAttribute("aria-label", `Série histórica do alvo ${target}`);
-
-        const width = 600;
-        const height = 160;
-        const padding = { top: 12, right: 12, bottom: 16, left: 12 };
-        sparklineSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-
-        const minTs = Math.min(cutoff, ...points.map((entry) => entry.ts));
-        const maxTs = Math.max(...points.map((entry) => entry.ts), minTs + 1);
-        const rangeTs = Math.max(maxTs - minTs, 1);
-
-        const minValue = values.reduce((acc, value) => (value < acc ? value : acc), values[0]);
-        const maxValue = values.reduce((acc, value) => (value > acc ? value : acc), values[0]);
-        const expand = (maxValue - minValue) * 0.1;
-        const valueMin = minValue - expand;
-        const valueMax = maxValue + expand;
-        const valueRange = Math.max(valueMax - valueMin, 1);
-
-        const projectX = (ts) => {
-          return (
-            padding.left +
-            ((ts - minTs) / rangeTs) * (width - padding.left - padding.right)
-          );
-        };
-
-        const projectY = (value) => {
-          const clamped = Math.max(Math.min(value, valueMax), valueMin);
-          return (
-            height -
-            padding.bottom -
-            ((clamped - valueMin) / valueRange) * (height - padding.top - padding.bottom)
-          );
-        };
-
-        function buildPath(pointsList, key, color) {
-          const valid = pointsList.filter((entry) => Number.isFinite(entry[key]));
-          if (!valid.length) {
-            return null;
-          }
-          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-          const d = valid
-            .map((entry, index) => {
-              const command = index === 0 ? "M" : "L";
-              const x = projectX(entry.ts).toFixed(2);
-              const y = projectY(entry[key]).toFixed(2);
-              return `${command}${x},${y}`;
-            })
-            .join(" ");
-          path.setAttribute("d", d);
-          path.setAttribute("fill", "none");
-          path.setAttribute("stroke", color);
-          path.setAttribute("stroke-width", "2.4");
-          path.setAttribute("stroke-linejoin", "round");
-          path.setAttribute("stroke-linecap", "round");
-          return path;
-        }
-
-        const avgPath = buildPath(points, "avg", "#38bdf8");
-        const p95Path = buildPath(points, "p95", "#34d399");
-
-        if (avgPath) {
-          sparklineSvg.appendChild(avgPath);
-        }
-        if (p95Path) {
-          sparklineSvg.appendChild(p95Path);
-        }
-      }
-
-      function setConnectionStatus(mode) {
-        statusBadge.classList.remove("connecting", "reconnecting");
-        if (mode === "live") {
-          statusBadge.textContent = "Atualizando ao vivo…";
-        } else if (mode === "reconnecting") {
-          statusBadge.classList.add("reconnecting");
-          statusBadge.textContent = "Reconectando…";
-        } else {
-          statusBadge.classList.add("connecting");
-          statusBadge.textContent = "Conectando…";
-        }
-      }
-
-      function updateLastUpdate(ts) {
-        const timestamp = Number(ts);
-        if (!Number.isFinite(timestamp)) {
-          lastUpdateEl.textContent = "—";
-          return;
-        }
-        const formatter = ensureFormatter();
-        lastUpdateEl.textContent = formatter.format(new Date(timestamp));
-      }
-
-      function updateTargetOptions(payloadTargets) {
-        const options = Array.from(new Set(payloadTargets || [])).filter(Boolean).sort();
-        const previous = state.target;
-
-        if (options.length === 0) {
-          state.target = "";
-          targetSelect.innerHTML = '<option value="" disabled selected>Sem alvos</option>';
-          targetSelect.disabled = true;
-          return;
-        }
-
-        targetSelect.disabled = false;
-        targetSelect.innerHTML = "";
-        for (const target of options) {
-          const option = document.createElement("option");
-          option.value = target;
-          option.textContent = target;
-          targetSelect.appendChild(option);
-        }
-
-        if (!previous) {
-          if (UI_CONFIG.defaultTarget && options.includes(UI_CONFIG.defaultTarget)) {
-            state.target = UI_CONFIG.defaultTarget;
-          } else {
-            state.target = options[0];
-          }
-        } else if (!options.includes(previous)) {
-          if (UI_CONFIG.defaultTarget && options.includes(UI_CONFIG.defaultTarget)) {
-            state.target = UI_CONFIG.defaultTarget;
-          } else {
-            state.target = options[0];
-          }
-        }
-
-        targetSelect.value = state.target;
-      }
-
-      function handlePayload(payload) {
-        latestPayload = payload;
-        const targets = Object.keys(payload?.ping ?? {});
-        updateTargetOptions(targets);
-        updateHistory(payload);
-        updatePingMetrics(state.target ? payload?.ping?.[state.target] : null);
-        updateAggregates(payload);
-        renderSparkline(state.target);
-        updateLastUpdate(payload?.ts);
-      }
-
-      function connect(isReconnect = false) {
-        if (eventSource) {
-          eventSource.close();
-          eventSource = null;
-        }
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
-
-        setConnectionStatus(isReconnect ? "reconnecting" : "connecting");
-        eventSource = new EventSource("/live/metrics");
-
-        eventSource.onopen = () => {
-          setConnectionStatus("live");
-        };
-
-        eventSource.onmessage = (event) => {
-          try {
-            const payload = JSON.parse(event.data);
-            handlePayload(payload);
-          } catch (error) {
-            console.error("Falha ao processar payload de métricas:", error);
-          }
-        };
-
-        eventSource.onerror = () => {
-          setConnectionStatus("reconnecting");
-          if (eventSource) {
-            eventSource.close();
-            eventSource = null;
-          }
-          if (!reconnectTimer) {
-            reconnectTimer = setTimeout(() => {
-              reconnectTimer = null;
-              connect(true);
-            }, Number(UI_CONFIG.sseRetryMs) || 3000);
-          }
-        };
-      }
-
-      rangeSelect.addEventListener("change", (event) => {
-        const minutes = Number.parseInt(event.target.value, 10);
-        state.rangeMinutes = rangeOptions.includes(minutes) ? minutes : state.rangeMinutes;
-        updateRangeSelect();
-        renderSparkline(state.target);
-      });
-
-      targetSelect.addEventListener("change", (event) => {
-        const value = String(event.target.value || "").trim();
-        if (!value) {
-          return;
-        }
-        state.target = value;
-        if (latestPayload) {
-          updatePingMetrics(latestPayload?.ping?.[state.target] ?? null);
-          renderSparkline(state.target);
-        }
-      });
-
-      updateRangeSelect();
-      connect();
-
-      window.addEventListener("beforeunload", () => {
-        if (eventSource) {
-          eventSource.close();
-        }
-      });
-    </script>
+    <script>window.UI_CONFIG = ${encodedConfig}; window.UI_STRINGS = ${encodedTooltips};</script>
   </body>
 </html>`;
 }
