@@ -135,6 +135,70 @@ const charts = {
 
 const chartOverlays = new Map();
 
+function normalize(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+const numberFormatters = new Map();
+
+function getNumberFormatter(digits) {
+  const key = Math.max(0, digits);
+  if (!numberFormatters.has(key)) {
+    numberFormatters.set(
+      key,
+      new Intl.NumberFormat("pt-BR", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: key,
+      })
+    );
+  }
+  return numberFormatters.get(key);
+}
+
+function fmtNumber(value, digits = 1) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return "—";
+  }
+  const abs = Math.abs(num);
+  let decimals = Math.max(0, Math.floor(digits));
+  if (abs >= 1000) {
+    decimals = 0;
+  } else if (abs >= 100) {
+    decimals = Math.min(decimals, 0);
+  } else if (abs >= 10) {
+    decimals = Math.min(decimals, Math.max(1, decimals));
+  } else if (abs >= 1) {
+    decimals = Math.min(Math.max(decimals, 1), 2);
+  } else {
+    decimals = Math.min(Math.max(decimals, 2), 3);
+  }
+  return getNumberFormatter(decimals).format(num);
+}
+
+function fmtMs(value, digits = 1) {
+  const text = fmtNumber(value, digits);
+  return text === "—" ? text : `${text} ms`;
+}
+
+function fmtPct(value, digits = 1) {
+  const text = fmtNumber(value, digits);
+  return text === "—" ? text : `${text}%`;
+}
+
+function formatTime(ts) {
+  try {
+    return new Intl.DateTimeFormat("pt-BR", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(new Date(ts));
+  } catch (error) {
+    return new Date(ts).toLocaleTimeString();
+  }
+}
+
 let eventSource = null;
 let reconnectTimer = null;
 let renderScheduled = false;
@@ -1832,70 +1896,6 @@ async function resolveEndpoint(paths, params = {}) {
     }
   });
   return fallback;
-}
-
-function normalize(value) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
-}
-
-const numberFormatters = new Map();
-
-function getNumberFormatter(digits) {
-  const key = Math.max(0, digits);
-  if (!numberFormatters.has(key)) {
-    numberFormatters.set(
-      key,
-      new Intl.NumberFormat("pt-BR", {
-        minimumFractionDigits: 0,
-        maximumFractionDigits: key,
-      })
-    );
-  }
-  return numberFormatters.get(key);
-}
-
-function fmtNumber(value, digits = 1) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) {
-    return "—";
-  }
-  const abs = Math.abs(num);
-  let decimals = Math.max(0, Math.floor(digits));
-  if (abs >= 1000) {
-    decimals = 0;
-  } else if (abs >= 100) {
-    decimals = Math.min(decimals, 0);
-  } else if (abs >= 10) {
-    decimals = Math.min(decimals, Math.max(1, decimals));
-  } else if (abs >= 1) {
-    decimals = Math.min(Math.max(decimals, 1), 2);
-  } else {
-    decimals = Math.min(Math.max(decimals, 2), 3);
-  }
-  return getNumberFormatter(decimals).format(num);
-}
-
-function fmtMs(value, digits = 1) {
-  const text = fmtNumber(value, digits);
-  return text === "—" ? text : `${text} ms`;
-}
-
-function fmtPct(value, digits = 1) {
-  const text = fmtNumber(value, digits);
-  return text === "—" ? text : `${text}%`;
-}
-
-function formatTime(ts) {
-  try {
-    return new Intl.DateTimeFormat("pt-BR", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    }).format(new Date(ts));
-  } catch (error) {
-    return new Date(ts).toLocaleTimeString();
-  }
 }
 
 function formatRelative(ts) {
