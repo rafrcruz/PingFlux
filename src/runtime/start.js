@@ -152,7 +152,16 @@ async function main() {
           logger.error("runtime", "Error while closing server", error);
         }
       });
-      logger.info("runtime", `Web server listening on http://${host}:${port}`);
+      const resolvedHost = serverHandle?.host ?? host;
+      const resolvedPort = serverHandle?.port ?? port;
+      const hostForLog =
+        typeof resolvedHost === "string" && resolvedHost.includes(":")
+          ? `[${resolvedHost}]`
+          : resolvedHost;
+      logger.info(
+        "runtime",
+        `Web server listening on http://${hostForLog}:${resolvedPort}`
+      );
     } catch (error) {
       logger.error("runtime", "Failed to start web server", error);
       await initiateShutdown("web error");

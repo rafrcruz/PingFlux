@@ -1,5 +1,6 @@
 import http from "http";
 import fs from "fs";
+import net from "net";
 import path from "path";
 import { fileURLToPath } from "url";
 import { runTraceroute } from "../collectors/traceroute.js";
@@ -230,6 +231,69 @@ function parseBooleanFlag(value, fallback = false) {
     }
   }
   return Boolean(fallback);
+}
+
+function probePortAvailability(port, host) {
+  return new Promise((resolve, reject) => {
+    const tester = net.createServer();
+    let settled = false;
+
+    const cleanup = () => {
+      tester.removeListener("error", onError);
+      tester.removeListener("listening", onListening);
+    };
+
+    const onError = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const onListening = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      const address = tester.address();
+      cleanup();
+      tester.close((closeError) => {
+        if (closeError) {
+          reject(closeError);
+          return;
+        }
+        const actualPort =
+          typeof address === "object" && address ? address.port : port;
+        resolve(actualPort);
+      });
+    };
+
+    tester.once("error", onError);
+    tester.once("listening", onListening);
+    tester.listen({ port, host, exclusive: true });
+  });
+}
+
+async function resolveListenPort(port, host, { allowFallback = true } = {}) {
+  try {
+    const resolvedPort = await probePortAvailability(port, host);
+    return { port: resolvedPort, conflict: false };
+  } catch (error) {
+    if (error?.code !== "EADDRINUSE") {
+      throw error;
+    }
+    if (!allowFallback) {
+      throw error;
+    }
+    try {
+      const fallbackPort = await probePortAvailability(0, host);
+      return { port: fallbackPort, conflict: true, conflictError: error };
+    } catch {
+      throw error;
+    }
+  }
 }
 
 function parseHealthWindow(value) {
@@ -1085,21 +1149,52 @@ function createRequestHandler(db, appConfig, options = {}) {
 
 export async function startServer({ host, port, db, signal, config, closeTimeoutMs = 1500 }) {
   const parsedPort = Number.parseInt(String(port ?? 3030), 10);
-  const configPort = Number.parseInt(config?.web?.port, 10);
-  const listenPort =
+  const configPort = Number.parseInt(
+    config?.server?.port ?? config?.web?.port,
+    10
+  );
+  let listenPort =
     Number.isFinite(parsedPort) && parsedPort > 0
       ? parsedPort
       : Number.isFinite(configPort) && configPort > 0
         ? configPort
         : 3030;
   const providedHost = typeof host === "string" ? host.trim() : "";
-  const configHost = typeof config?.web?.host === "string" ? config.web.host.trim() : "";
+  const configHostValue = config?.server?.host ?? config?.web?.host;
+  const configHost = typeof configHostValue === "string" ? configHostValue.trim() : "";
   const requestedHost = providedHost || configHost;
   const listenHost = requestedHost
     ? requestedHost === "localhost"
       ? "127.0.0.1"
       : requestedHost
     : "0.0.0.0";
+
+  const allowPortFallback = parseBooleanFlag(process.env.PORT_FALLBACK, true);
+  const requestedPort = listenPort;
+
+  try {
+    const { port: resolvedPort, conflict } = await resolveListenPort(listenPort, listenHost, {
+      allowFallback: allowPortFallback,
+    });
+    listenPort = resolvedPort;
+    if (conflict && resolvedPort !== requestedPort) {
+      logger.warn(
+        "web",
+        `Port ${requestedPort} already in use on ${listenHost}. Using fallback port ${listenPort}. Set PORT_FALLBACK=off to disable auto selection.`
+      );
+    }
+  } catch (error) {
+    if (error?.code === "EADDRINUSE") {
+      const message = `Port ${requestedPort} is already in use on ${listenHost}. Set PORT to a free port or stop the conflicting process.`;
+      const enhancedError = new Error(message);
+      enhancedError.code = error.code;
+      enhancedError.cause = error;
+      throw enhancedError;
+    }
+    throw error;
+  }
+
+  const portConflict = listenPort !== requestedPort;
 
   const configuredTargets = Array.isArray(config?.ping?.targets) ? config.ping.targets : [];
   const normalizedTargets = configuredTargets
@@ -1222,9 +1317,27 @@ export async function startServer({ host, port, db, signal, config, closeTimeout
 
       exportedClose = close;
 
+      let actualPort = listenPort;
+      let actualHost = listenHost;
+      const address = server.address();
+      if (address && typeof address === "object") {
+        if (typeof address.port === "number") {
+          actualPort = address.port;
+        }
+        if (typeof address.address === "string" && address.address) {
+          actualHost = address.address;
+        }
+      } else if (typeof address === "string" && address) {
+        actualHost = address;
+      }
+
       finishResolve({
         close,
         server,
+        port: actualPort,
+        host: actualHost,
+        requestedPort,
+        portConflict,
       });
     };
 

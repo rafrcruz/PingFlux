@@ -86,7 +86,6 @@ function extractPingTargets({ configTargets, runtimeTargets, windowTargets }) {
   return Array.from(targets).sort();
 }
 
-function computePingMetrics({
 function buildWindowEntries(windowDefs, snapshot) {
   const entries = {};
   for (const def of windowDefs) {
