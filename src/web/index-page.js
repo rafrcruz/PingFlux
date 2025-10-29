@@ -102,7 +102,6 @@ export function renderIndexPage(uiConfig, options = {}) {
             <span class="control-label">Janela visual</span>
             <div id="rangeButtons" class="range-buttons" role="group"></div>
           </div>
-          <button id="pauseStream" class="control ghost-button" aria-pressed="false">Pausar stream</button>
         </section>
       </header>
 

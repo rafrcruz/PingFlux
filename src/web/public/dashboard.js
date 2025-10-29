@@ -112,11 +112,8 @@ const state = {
   connectedEndpointIndex: 0,
   reconnectAttempts: 0,
   lastUpdateTs: null,
-  visibleUpdateTs: null,
   targets: [],
   selectedTarget: DEFAULT_TARGET || "",
-  paused: false,
-  hasPendingWhilePaused: false,
   rangeMinutes: RANGE_OPTIONS[0],
   pingAggregates: new Map(),
   pingSamples: new Map(),
@@ -148,7 +145,6 @@ const refs = {
   targetSelect: document.getElementById("targetSelect"),
   targetMode: document.getElementById("pingModeIndicator"),
   rangeButtons: document.getElementById("rangeButtons"),
-  pauseButton: document.getElementById("pauseStream"),
   resetZoom: document.getElementById("resetZoom"),
   eventList: document.getElementById("eventList"),
   tracerouteTimeline: document.getElementById("tracerouteTimeline"),
@@ -346,7 +342,6 @@ function init() {
     bootstrapTargetData(state.selectedTarget).catch(() => {});
     fetchTraceroute(state.selectedTarget).catch(() => {});
   }
-  updatePauseState();
   scheduleRender();
   updateNetworkStatus();
   startEventsRefreshTimer();
@@ -478,16 +473,6 @@ function mountControls() {
     }
   });
 
-  refs.pauseButton?.addEventListener("click", () => {
-    state.paused = !state.paused;
-    updatePauseState();
-    if (!state.paused && state.hasPendingWhilePaused) {
-      state.visibleUpdateTs = state.lastUpdateTs;
-      state.hasPendingWhilePaused = false;
-      scheduleRender();
-    }
-  });
-
   refs.resetZoom?.addEventListener("click", () => {
     charts.latency?.dispatchAction({ type: "dataZoom", start: 0, end: 100 });
   });
@@ -498,19 +483,6 @@ function mountControls() {
     }
     triggerTraceroute(state.selectedTarget).catch(() => {});
   });
-}
-
-function updatePauseState() {
-  if (!refs.pauseButton) {
-    return;
-  }
-  refs.pauseButton.textContent = state.paused ? "Retomar stream" : "Pausar stream";
-  refs.pauseButton.setAttribute("aria-pressed", state.paused ? "true" : "false");
-  if (state.paused) {
-    refs.pauseButton.classList.add("paused");
-  } else {
-    refs.pauseButton.classList.remove("paused");
-  }
 }
 
 async function onWindowRangeChanged() {
@@ -1010,11 +982,6 @@ function handleLivePayload(payload) {
     return;
   }
   state.lastUpdateTs = Number(payload.ts) || Date.now();
-  if (!state.paused) {
-    state.visibleUpdateTs = state.lastUpdateTs;
-  } else {
-    state.hasPendingWhilePaused = true;
-  }
 
   markLiveDataReceived();
 
@@ -1039,9 +1006,7 @@ function handleLivePayload(payload) {
   ingestDnsMetrics(payload.dns, state.lastUpdateTs);
   ingestHttpMetrics(payload.http, state.lastUpdateTs);
 
-  if (!state.paused) {
-    scheduleRender();
-  }
+  scheduleRender();
   updateConnectionStatus();
 }
 
@@ -1955,13 +1920,13 @@ function updateLastUpdate() {
   if (!refs.lastUpdate) {
     return;
   }
-  if (!state.visibleUpdateTs) {
+  if (!state.lastUpdateTs) {
     refs.lastUpdate.textContent = "Última atualização: —";
     refs.lastUpdate.removeAttribute("datetime");
     return;
   }
-  const iso = new Date(state.visibleUpdateTs).toISOString();
-  refs.lastUpdate.textContent = `Última atualização: ${formatTime(state.visibleUpdateTs)}`;
+  const iso = new Date(state.lastUpdateTs).toISOString();
+  refs.lastUpdate.textContent = `Última atualização: ${formatTime(state.lastUpdateTs)}`;
   refs.lastUpdate.setAttribute("datetime", iso);
 }
 
