@@ -17,7 +17,8 @@
     "dns:loop": "node src/tools/dns-loop.js",
     "http:once": "node src/tools/http-once.js",
     "http:loop": "node src/tools/http-loop.js",
-    "maintenance:run": "node src/tools/maintenance-run.js"
+    "maintenance:run": "node src/tools/maintenance-run.js",
+    "diag": "node src/tools/diagnostics.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1"
