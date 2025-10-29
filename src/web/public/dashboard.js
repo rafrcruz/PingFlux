@@ -83,7 +83,7 @@ function getWindowKeyFromRange(range) {
   return "win1m";
 }
 
-const severityRank = { ok: 0, warn: 1, crit: 2 };
+const severityRank = { info: 0, warn: 1, critical: 2 };
 const HEAT_BUCKETS = [0, 50, 100, 150, 200, 300, 500, 800, 1200];
 const HEAT_LABELS = [
   "<50 ms",
@@ -964,6 +964,21 @@ function updateTargetStatusDisplay() {
   updateNetworkStatus();
 }
 
+// Chooses which DNS aggregate (cold preferred) should drive the UI.
+// Called whenever live metrics push a DNS update (every few seconds).
+function selectDnsPrimaryStats(aggregate) {
+  if (!aggregate) {
+    return null;
+  }
+  if (aggregate.cold && Number(aggregate.cold.samples) > 0) {
+    return aggregate.cold;
+  }
+  if (aggregate.hot && Number(aggregate.hot.samples) > 0) {
+    return aggregate.hot;
+  }
+  return aggregate;
+}
+
 function ingestPingMetrics(target, metrics, ts) {
   updateTargetIndicators(target, metrics);
   const summaryMap = state.windowSummaries.get(target) ?? new Map();
@@ -1005,8 +1020,9 @@ function ingestDnsMetrics(dns, ts) {
     return;
   }
   state.dnsLatest = dns.aggregate;
-  const value = normalize(dns.aggregate.win1m_avg_ms);
-  const entry = { ts, value, avg5m: normalize(dns.aggregate.win5m_avg_ms) };
+  const stats = selectDnsPrimaryStats(dns.aggregate);
+  const value = normalize(stats?.win1m_avg_ms);
+  const entry = { ts, value, avg5m: normalize(stats?.win5m_avg_ms) };
   state.dnsSeries.push(entry);
   pruneSeries(state.dnsSeries, DNS_HISTORY_LIMIT_MS);
   updateDnsKpi();
@@ -1018,19 +1034,20 @@ function ingestDnsMetrics(dns, ts) {
 
 function resolveDnsValueForWindow(windowKey) {
   const aggregate = state.dnsLatest;
-  if (!aggregate) {
+  const stats = selectDnsPrimaryStats(aggregate);
+  if (!stats) {
     return null;
   }
   switch (windowKey) {
     case "win5m":
-      return normalize(aggregate.win5m_avg_ms);
+      return normalize(stats.win5m_avg_ms);
     case "win15m":
-      return normalize(aggregate.win15m_avg_ms);
+      return normalize(stats.win15m_avg_ms);
     case "win60m":
-      return normalize(aggregate.win60m_avg_ms);
+      return normalize(stats.win60m_avg_ms);
     case "win1m":
     default:
-      return normalize(aggregate.win1m_avg_ms);
+      return normalize(stats.win1m_avg_ms);
   }
 }
 
@@ -1087,33 +1104,40 @@ function updateKpis(summary) {
   const p50 = summary?.win_p50_ms;
   const avg = summary?.win_avg_ms;
   const loss = summary?.win_loss_pct;
+  const availabilitySummary = normalize(summary?.win_availability_pct);
+  const status = summary?.status || null;
   updateKpi("ping-p95", p95, {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-p95",
+    status,
   });
   updateKpi("ping-p50", p50, {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-p50",
+    status,
   });
   updateKpi("ping-avg", avg, {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-avg",
+    status,
   });
   updateKpi("ping-loss", loss, {
     threshold: thresholds.loss,
     higherIsBad: true,
     trendKey: "ping-loss",
     formatter: fmtPct,
+    status,
   });
-  const availability = loss == null ? null : clampGaugeValue(100 - loss);
+  const availability = availabilitySummary != null ? availabilitySummary : loss == null ? null : clampGaugeValue(100 - loss);
   updateKpi("ping-availability", availability, {
     threshold: thresholds.loss,
     higherIsBad: false,
     trendKey: "ping-availability",
     formatter: (value) => fmtPct(value),
+    status,
   });
   updateGauge(availability);
   updateNetworkStatus(summary);
@@ -1211,7 +1235,9 @@ function buildSummaryFromMetrics(metrics, key) {
     win_p50_ms: normalize(entry.p50_ms),
     win_avg_ms: normalize(entry.avg_ms),
     win_loss_pct: normalize(entry.loss_pct),
+    win_availability_pct: normalize(entry.availability_pct),
     win_samples: Number(entry.samples) || 0,
+    status: typeof entry.status === "string" ? entry.status : null,
   };
 }
 
@@ -1230,19 +1256,19 @@ function updateNetworkStatus(summary) {
     refs.networkStatusText.textContent = "Aguardando dados de RTT…";
     return;
   }
-  const p95Severity = state.severities.get("ping-p95") || "ok";
-  const lossSeverity = state.severities.get("ping-loss") || "ok";
+  const p95Severity = state.severities.get("ping-p95") || "info";
+  const lossSeverity = state.severities.get("ping-loss") || "info";
   const p95Rank = severityRank[p95Severity] ?? 0;
   const lossRank = severityRank[lossSeverity] ?? 0;
   const worstSeverity = lossRank > p95Rank ? lossSeverity : p95Severity;
   const worstRank = severityRank[worstSeverity] ?? 0;
   let label = "Rede estável";
-  if (worstRank > severityRank.ok) {
+  if (worstRank > severityRank.info) {
     label = lossRank > p95Rank ? "Perda de pacotes elevada" : "Latência alta";
   }
   let statusClass = "network-status--ok";
-  if (worstRank >= severityRank.crit) {
-    statusClass = "network-status--crit";
+  if (worstRank >= severityRank.critical) {
+    statusClass = "network-status--critical";
   } else if (worstRank >= severityRank.warn) {
     statusClass = "network-status--warn";
   }
@@ -1256,23 +1282,35 @@ function updateKpi(key, value, options = {}) {
     return;
   }
   const formatter = typeof options.formatter === "function" ? options.formatter : fmtMs;
-  const valueText = formatter(value);
+  const status = options.status;
+  const isInsufficient = status === "insufficient";
+  const valueText = isInsufficient
+    ? STRINGS.insufficientSamples || "Amostra insuficiente"
+    : formatter(value);
   renderKpiValue(card.valueEl, valueText);
-  if (valueText === "—") {
+  if (isInsufficient) {
+    card.valueEl.setAttribute(
+      "title",
+      STRINGS.insufficientSamples || "Sem dados suficientes no período."
+    );
+    card.element.setAttribute("data-loading", "true");
+  } else if (valueText === "—") {
     card.valueEl.setAttribute("title", STRINGS.noData || "Sem dados suficientes no período.");
     card.element.setAttribute("data-loading", "true");
   } else {
     card.valueEl.removeAttribute("title");
     card.element.removeAttribute("data-loading");
   }
-  const severity = determineSeverity(value, options.threshold, options.higherIsBad !== false);
-  const previous = state.severities.get(key) || "ok";
+  const severity = isInsufficient
+    ? "info"
+    : determineSeverity(value, options.threshold, options.higherIsBad !== false);
+  const previous = state.severities.get(key) || "info";
   state.severities.set(key, severity);
-  card.element.classList.remove("warn", "crit");
+  card.element.classList.remove("warn", "critical");
   if (severity === "warn") {
     card.element.classList.add("warn");
-  } else if (severity === "crit") {
-    card.element.classList.add("crit");
+  } else if (severity === "critical") {
+    card.element.classList.add("critical");
   }
 
   const trend = computeTrend(options.trendKey, value, options.higherIsBad !== false);
@@ -1286,17 +1324,17 @@ function updateKpi(key, value, options = {}) {
     card.arrowEl.style.color = trend.color;
   }
 
-  if (severityRank[severity] > severityRank[previous]) {
+  if (!isInsufficient && severityRank[severity] > severityRank[previous]) {
     let message = "";
     switch (key) {
       case "ping-p95":
-        message = `RTT p95 ${severity === "crit" ? "crítico" : "elevado"}: ${formatter(value)}`;
+        message = `RTT p95 ${severity === "critical" ? "crítico" : "elevado"}: ${formatter(value)}`;
         break;
       case "ping-loss":
-        message = `Perda de pacotes ${severity === "crit" ? "crítica" : "alta"}: ${formatter(value)}`;
+        message = `Perda de pacotes ${severity === "critical" ? "crítica" : "alta"}: ${formatter(value)}`;
         break;
       case "ping-availability":
-        message = `Disponibilidade em ${severity === "crit" ? "estado crítico" : "atenção"}: ${formatter(value)}`;
+        message = `Disponibilidade em ${severity === "critical" ? "estado crítico" : "atenção"}: ${formatter(value)}`;
         break;
       case "dns-lookup":
         message = `DNS lento (${formatter(value)})`;
@@ -1360,6 +1398,10 @@ function updateEventsFromSummary(summary) {
   if (!summary) {
     return;
   }
+  if (summary.status === "insufficient") {
+    state.prevValues.set("ping-p95", summary.win_p95_ms);
+    return;
+  }
   updateEventsForMetric("ping-p95", summary.win_p95_ms, thresholds.p95, "RTT p95 elevado", {
     formatter: fmtMs,
     eventType: "ping",
@@ -1387,7 +1429,7 @@ function updateEventsFromSummary(summary) {
 function updateEventsForMetric(key, value, threshold, label, options = {}) {
   const higherIsBad = options.higherIsBad !== false;
   const severity = determineSeverity(value, threshold, higherIsBad);
-  const prev = state.severities.get(key) || "ok";
+  const prev = state.severities.get(key) || "info";
   state.severities.set(key, severity);
   if (severityRank[severity] > severityRank[prev]) {
     const formatter = typeof options.formatter === "function" ? options.formatter : fmtMs;
@@ -1405,7 +1447,7 @@ function updateEventsForMetric(key, value, threshold, label, options = {}) {
 
 function determineSeverity(value, threshold, higherIsBad = true) {
   if (!threshold || value == null || !Number.isFinite(value)) {
-    return "ok";
+    return "info";
   }
   const warn = Number(threshold.warn);
   const crit = Number(threshold.crit);
@@ -1413,23 +1455,23 @@ function determineSeverity(value, threshold, higherIsBad = true) {
     const warnBoundary = Number.isFinite(warn) ? clampGaugeValue(100 - warn) : null;
     const critBoundary = Number.isFinite(crit) ? clampGaugeValue(100 - crit) : null;
     if (critBoundary != null && value < critBoundary) {
-      return "crit";
+      return "critical";
     }
     if (warnBoundary != null && value < warnBoundary) {
       return "warn";
     }
-    return "ok";
+    return "info";
   }
   if (Number.isFinite(crit) && value >= crit) {
-    return "crit";
+    return "critical";
   }
   if (Number.isFinite(warn) && value >= warn) {
     return "warn";
   }
-  return "ok";
+  return "info";
 }
 
-function pushEvent({ key, type, severity = "ok", message, icon = "ℹ" }) {
+function pushEvent({ key, type, severity = "info", message, icon = "ℹ" }) {
   if (!message) {
     return;
   }
@@ -1495,7 +1537,9 @@ function renderEvents() {
   }
   state.events.forEach((event) => {
     const item = document.createElement("li");
-    item.className = `event-item ${event.severity !== "ok" ? event.severity : ""}`.trim();
+    const severityClass =
+      event.severity === "critical" || event.severity === "warn" ? event.severity : "";
+    item.className = `event-item ${severityClass}`.trim();
     const iconSpan = document.createElement("span");
     iconSpan.className = "event-icon";
     iconSpan.textContent = event.icon;
@@ -1773,6 +1817,54 @@ async function fetchPingWindowData(target, rangeKey, options = {}) {
   }
 }
 
+// Normalizes traceroute hops to the client format (single RTT and IP fields).
+// Invoked whenever we ingest traceroute payloads from the API.
+function normalizeTracerouteHopClient(raw, index) {
+  const hopNumber = Number(raw?.hop ?? raw?.index);
+  const hop = Number.isFinite(hopNumber) && hopNumber > 0 ? hopNumber : index + 1;
+  const ipCandidates = [raw?.ip, raw?.address]
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+  const ip = ipCandidates.length > 0 ? ipCandidates[0] : "*";
+
+  const latencyCandidates = [];
+  if (Array.isArray(raw?.rtt)) {
+    for (const value of raw.rtt) {
+      latencyCandidates.push(value);
+    }
+  }
+  latencyCandidates.push(raw?.rtt_ms, raw?.rtt1_ms, raw?.rtt2_ms, raw?.rtt3_ms);
+
+  const rtt = latencyCandidates
+    .map((value) => Number(value))
+    .find((value) => Number.isFinite(value) && value >= 0);
+
+  return { hop, ip: ip || "*", rtt_ms: Number.isFinite(rtt) ? rtt : null };
+}
+
+// Produces a normalized traceroute result for the UI from API payloads.
+// Called on every manual or automatic traceroute refresh.
+function normalizeTracerouteResult(data) {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  const executedTs = data.executed_at ? Date.parse(data.executed_at) : Number(data.ts);
+  const normalizedHops = Array.isArray(data.hops)
+    ? data.hops.map((hop, index) => normalizeTracerouteHopClient(hop, index))
+    : [];
+  return {
+    ...data,
+    hops: normalizedHops,
+    ts: Number.isFinite(executedTs) ? executedTs : null,
+    executed_at:
+      typeof data.executed_at === "string" && data.executed_at
+        ? data.executed_at
+        : Number.isFinite(executedTs)
+          ? new Date(executedTs).toISOString()
+          : null,
+  };
+}
+
 async function fetchTraceroute(target) {
   if (!target) {
     state.traceroute = null;
@@ -1792,13 +1884,22 @@ async function fetchTraceroute(target) {
       }
       throw new Error(`HTTP ${response.status}`);
     }
-    const data = await response.json();
-    const isNewResult =
-      !state.traceroute || state.traceroute.id !== data.id || state.traceroute.ts !== data.ts;
-    if (isNewResult) {
-      state.tracerouteExpanded = !isTracerouteStale(data);
+    const raw = await response.json();
+    const normalized = normalizeTracerouteResult(raw);
+    if (!normalized) {
+      state.traceroute = null;
+      state.tracerouteExpanded = false;
+      renderTraceroute();
+      return;
     }
-    state.traceroute = data;
+    const isNewResult =
+      !state.traceroute ||
+      state.traceroute.id !== normalized.id ||
+      state.traceroute.ts !== normalized.ts;
+    if (isNewResult) {
+      state.tracerouteExpanded = !isTracerouteStale(normalized);
+    }
+    state.traceroute = normalized;
     renderTraceroute();
   } catch (error) {
     console.error("Falha ao buscar traceroute:", error);
@@ -1821,15 +1922,24 @@ function renderTraceroute() {
     refs.tracerouteMeta.textContent = "Sem execuções";
     return;
   }
-  const ageMs = Date.now() - Number(traceroute.ts);
+  const executedTs = Number(traceroute.ts);
+  const ageMs = Number.isFinite(executedTs) ? Date.now() - executedTs : NaN;
   const isStale = Number.isFinite(ageMs) && ageMs > TRACEROUTE_MAX_AGE_MIN * 60 * 1000;
   if (!isStale) {
     state.tracerouteExpanded = true;
   }
   const ageLabel = Number.isFinite(ageMs) ? formatAgeHhMm(ageMs) : "--:--";
-  refs.tracerouteMeta.textContent = isStale
-    ? `resultado antigo (${ageLabel} atrás)`
-    : `Executado há ${formatRelative(traceroute.ts)}`;
+  let metaText;
+  if (isStale) {
+    metaText = `resultado antigo (${ageLabel} atrás)`;
+  } else if (Number.isFinite(executedTs)) {
+    metaText = `Executado há ${formatRelative(executedTs)}`;
+  } else if (typeof traceroute.executed_at === "string" && traceroute.executed_at) {
+    metaText = `Executado em ${traceroute.executed_at}`;
+  } else {
+    metaText = "Execução recente";
+  }
+  refs.tracerouteMeta.textContent = metaText;
 
   const shouldCollapse = isStale && !state.tracerouteExpanded;
   if (shouldCollapse) {
@@ -1865,15 +1975,11 @@ function renderTraceroute() {
     return;
   }
 
-  const allNoResponse =
-    traceroute.success === 0 &&
-    traceroute.hops.every((hop) => {
-      const addr = hop?.address;
-      const rtts = Array.isArray(hop?.rtt)
-        ? hop.rtt.filter((value) => Number.isFinite(Number(value)))
-        : [];
-      return (!addr || addr === "*") && rtts.length === 0;
-    });
+  const allNoResponse = traceroute.hops.every((hop) => {
+    const ip = typeof hop?.ip === "string" ? hop.ip.trim() : "";
+    const rttValue = Number(hop?.rtt_ms);
+    return (!ip || ip === "*") && !Number.isFinite(rttValue);
+  });
 
   if (allNoResponse) {
     const empty = document.createElement("div");
@@ -1885,23 +1991,20 @@ function renderTraceroute() {
 
   traceroute.hops.forEach((hop, index) => {
     const item = document.createElement("div");
-    const success = hop && hop.success !== false;
+    const rttValue = Number(hop?.rtt_ms);
+    const success = Number.isFinite(rttValue);
     item.className = `traceroute-hop ${success ? "ok" : "fail"}`.trim();
     const indexEl = document.createElement("span");
     indexEl.className = "hop-index";
-    indexEl.textContent = String(index + 1);
+    indexEl.textContent = String(Number.isFinite(Number(hop?.hop)) ? hop.hop : index + 1);
     const info = document.createElement("div");
     info.className = "hop-info";
     const addr = document.createElement("span");
-    addr.textContent = hop?.address || "*";
+    const hopIp = typeof hop?.ip === "string" && hop.ip.trim().length ? hop.ip.trim() : "*";
+    addr.textContent = hopIp;
     const rtt = document.createElement("span");
     rtt.className = "hop-rtt";
-    const rtts = Array.isArray(hop?.rtt)
-      ? hop.rtt.filter((value) => Number.isFinite(Number(value)))
-      : [];
-    const rttText = rtts.length
-      ? rtts.map((value) => fmtMs(Number(value))).join(" · ")
-      : "sem resposta";
+    const rttText = Number.isFinite(rttValue) ? fmtMs(rttValue) : "sem resposta";
     rtt.textContent = rttText;
     info.append(addr, rtt);
     item.append(indexEl, info);
@@ -1931,10 +2034,10 @@ async function triggerTraceroute(target) {
       await fetchTraceroute(target);
     }
     state.tracerouteExpanded = true;
-    pushEvent({ severity: "ok", message: `Traceroute para ${target} executado`, icon: "🛰" });
+    pushEvent({ severity: "info", message: `Traceroute para ${target} executado`, icon: "🛰" });
   } catch (error) {
     console.error("Falha ao executar traceroute:", error);
-    pushEvent({ severity: "crit", message: "Erro ao executar traceroute", icon: "⛔" });
+    pushEvent({ severity: "critical", message: "Erro ao executar traceroute", icon: "⛔" });
   } finally {
     state.tracerouteLoading = false;
     if (refs.tracerouteTrigger) {
@@ -1952,13 +2055,19 @@ async function fetchTracerouteById(id) {
       if (!response.ok) {
         continue;
       }
-      const data = await response.json();
-      const isNewResult =
-        !state.traceroute || state.traceroute.id !== data.id || state.traceroute.ts !== data.ts;
-      if (isNewResult) {
-        state.tracerouteExpanded = !isTracerouteStale(data);
+      const raw = await response.json();
+      const normalized = normalizeTracerouteResult(raw);
+      if (!normalized) {
+        continue;
       }
-      state.traceroute = data;
+      const isNewResult =
+        !state.traceroute ||
+        state.traceroute.id !== normalized.id ||
+        state.traceroute.ts !== normalized.ts;
+      if (isNewResult) {
+        state.tracerouteExpanded = !isTracerouteStale(normalized);
+      }
+      state.traceroute = normalized;
       renderTraceroute();
       return;
     } catch (error) {
@@ -2024,10 +2133,17 @@ function formatAgeHhMm(ms) {
 }
 
 function isTracerouteStale(result) {
-  if (!result || result.ts == null) {
+  if (!result) {
     return false;
   }
-  const ageMs = Date.now() - Number(result.ts);
+  const ts =
+    result.ts != null && Number.isFinite(Number(result.ts))
+      ? Number(result.ts)
+      : Date.parse(result.executed_at);
+  if (!Number.isFinite(ts)) {
+    return false;
+  }
+  const ageMs = Date.now() - ts;
   return Number.isFinite(ageMs) && ageMs > TRACEROUTE_MAX_AGE_MIN * 60 * 1000;
 }
 

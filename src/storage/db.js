@@ -67,6 +67,53 @@ CREATE TABLE IF NOT EXISTS ping_window_1m (
   p50_ms REAL,
   p95_ms REAL,
   stdev_ms REAL,
+  availability_pct REAL,
+  status TEXT,
+  PRIMARY KEY (ts_min, target)
+);
+
+CREATE TABLE IF NOT EXISTS ping_window_5m (
+  ts_min INTEGER NOT NULL,
+  target TEXT NOT NULL,
+  sent INTEGER NOT NULL,
+  received INTEGER NOT NULL,
+  loss_pct REAL NOT NULL,
+  avg_ms REAL,
+  p50_ms REAL,
+  p95_ms REAL,
+  stdev_ms REAL,
+  availability_pct REAL,
+  status TEXT,
+  PRIMARY KEY (ts_min, target)
+);
+
+CREATE TABLE IF NOT EXISTS ping_window_15m (
+  ts_min INTEGER NOT NULL,
+  target TEXT NOT NULL,
+  sent INTEGER NOT NULL,
+  received INTEGER NOT NULL,
+  loss_pct REAL NOT NULL,
+  avg_ms REAL,
+  p50_ms REAL,
+  p95_ms REAL,
+  stdev_ms REAL,
+  availability_pct REAL,
+  status TEXT,
+  PRIMARY KEY (ts_min, target)
+);
+
+CREATE TABLE IF NOT EXISTS ping_window_60m (
+  ts_min INTEGER NOT NULL,
+  target TEXT NOT NULL,
+  sent INTEGER NOT NULL,
+  received INTEGER NOT NULL,
+  loss_pct REAL NOT NULL,
+  avg_ms REAL,
+  p50_ms REAL,
+  p95_ms REAL,
+  stdev_ms REAL,
+  availability_pct REAL,
+  status TEXT,
   PRIMARY KEY (ts_min, target)
 );
 
@@ -76,7 +123,11 @@ CREATE TABLE IF NOT EXISTS dns_sample (
   hostname TEXT NOT NULL,
   resolver TEXT,
   lookup_ms REAL,
-  success INTEGER NOT NULL
+  lookup_ms_hot REAL,
+  lookup_ms_cold REAL,
+  success INTEGER NOT NULL DEFAULT 0,
+  success_hot INTEGER,
+  success_cold INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_dns_sample_ts ON dns_sample(ts);
 
@@ -119,14 +170,38 @@ export function migrate() {
 
   try {
     const columns = db.prepare("PRAGMA table_info(ping_window_1m)").all();
-    const hasAvgColumn = Array.isArray(columns)
-      ? columns.some((column) => column?.name === "avg_ms")
-      : false;
-    if (!hasAvgColumn) {
-      db.exec("ALTER TABLE ping_window_1m ADD COLUMN avg_ms REAL");
-    }
+    const ensureColumn = (name, ddl) => {
+      const exists = Array.isArray(columns)
+        ? columns.some((column) => column?.name === name)
+        : false;
+      if (!exists) {
+        db.exec(`ALTER TABLE ping_window_1m ADD COLUMN ${ddl}`);
+      }
+    };
+    ensureColumn("avg_ms", "avg_ms REAL");
+    ensureColumn("availability_pct", "availability_pct REAL");
+    ensureColumn("status", "status TEXT");
   } catch (error) {
-    // If the table does not exist yet or the column already exists, ignore.
+    if (!/duplicate column name/i.test(String(error?.message ?? ""))) {
+      throw error;
+    }
+  }
+
+  try {
+    const columns = db.prepare("PRAGMA table_info(dns_sample)").all();
+    const ensureColumn = (name, ddl) => {
+      const exists = Array.isArray(columns)
+        ? columns.some((column) => column?.name === name)
+        : false;
+      if (!exists) {
+        db.exec(`ALTER TABLE dns_sample ADD COLUMN ${ddl}`);
+      }
+    };
+    ensureColumn("lookup_ms_hot", "lookup_ms_hot REAL");
+    ensureColumn("lookup_ms_cold", "lookup_ms_cold REAL");
+    ensureColumn("success_hot", "success_hot INTEGER");
+    ensureColumn("success_cold", "success_cold INTEGER");
+  } catch (error) {
     if (!/duplicate column name/i.test(String(error?.message ?? ""))) {
       throw error;
     }

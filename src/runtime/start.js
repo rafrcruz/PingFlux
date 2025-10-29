@@ -4,6 +4,7 @@ import * as pingCollector from "../collectors/ping.js";
 import * as pingAggregator from "../collectors/ping-aggregate-loop.js";
 import * as dnsCollector from "../collectors/dns.js";
 import * as httpCollector from "../collectors/http.js";
+import * as tracerouteCollector from "../collectors/traceroute-loop.js";
 import { startServer } from "../web/server.js";
 import * as logger from "../utils/logger.js";
 import {
@@ -46,6 +47,10 @@ async function main() {
   const enablePing = toBooleanFlag(process.env.ENABLE_PING, featureDefaults.enablePing ?? true);
   const enableDns = toBooleanFlag(process.env.ENABLE_DNS, featureDefaults.enableDns ?? true);
   const enableHttp = toBooleanFlag(process.env.ENABLE_HTTP, featureDefaults.enableHttp ?? true);
+  const enableTraceroute = toBooleanFlag(
+    process.env.ENABLE_TRACEROUTE,
+    featureDefaults.enableTraceroute ?? true
+  );
 
   const shutdownSignal = getShutdownSignal();
 
@@ -116,6 +121,7 @@ async function main() {
     "ping-agg": startCollector("ping-agg", pingAggregator, enablePing),
     dns: startCollector("dns", dnsCollector, enableDns),
     http: startCollector("http", httpCollector, enableHttp),
+    traceroute: startCollector("traceroute", tracerouteCollector, enableTraceroute),
   };
 
   if (collectorPromises.length > 0) {
@@ -160,6 +166,7 @@ async function main() {
     ping: enablePing,
     dns: enableDns,
     http: enableHttp,
+    traceroute: enableTraceroute,
   })
     .filter(([, enabled]) => !enabled)
     .map(([name]) => name);

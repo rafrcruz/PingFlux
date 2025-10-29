@@ -152,6 +152,20 @@ function readJsonBody(req, maxBytes = 256 * 1024) {
 }
 
 const MINUTE_MS = 60 * 1000;
+const PING_WINDOW_TABLES = Object.freeze([
+  "ping_window_1m",
+  "ping_window_5m",
+  "ping_window_15m",
+  "ping_window_60m",
+]);
+const RANGE_TO_WINDOW_TABLE = Object.freeze({
+  "1m": "ping_window_1m",
+  "5m": "ping_window_5m",
+  "15m": "ping_window_15m",
+  "60m": "ping_window_60m",
+  "1h": "ping_window_60m",
+});
+const DEFAULT_WINDOW_TABLE = "ping_window_1m";
 const RANGE_TO_DURATION_MS = {
   "1m": MINUTE_MS,
   "5m": 5 * MINUTE_MS,
@@ -286,6 +300,20 @@ function buildThresholdPair(warn, crit) {
   };
 }
 
+// Derives warn/critical thresholds from a single alert value.
+// Used during server start-up to configure UI thresholds from .env values.
+function deriveAlertThreshold(alertValue, fallbackWarn, fallbackCrit) {
+  const critValue = parseFiniteNumber(alertValue);
+  if (critValue != null) {
+    const warnValue = critValue * 0.75;
+    return {
+      warn: warnValue,
+      crit: critValue,
+    };
+  }
+  return buildThresholdPair(fallbackWarn, fallbackCrit);
+}
+
 function getUiConfig(providedConfig) {
   const base = providedConfig && typeof providedConfig === "object" ? providedConfig : {};
   const thresholds = base.thresholds && typeof base.thresholds === "object" ? base.thresholds : {};
@@ -364,12 +392,48 @@ function resolveRangeWindow(rawRange) {
   const nowMs = Date.now();
   const fromMs = nowMs - durationMs;
 
-  return { fromMs, toMs: nowMs, rangeKey, durationMs };
+  const windowTable = RANGE_TO_WINDOW_TABLE[rangeKey] ?? null;
+
+  return { fromMs, toMs: nowMs, rangeKey, durationMs, windowTable };
+}
+
+function preparePingWindowStatements(db) {
+  const result = Object.create(null);
+  for (const table of PING_WINDOW_TABLES) {
+    const selectBase = `
+      SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms, availability_pct, status
+      FROM ${table}
+    `;
+    result[table] = {
+      rangeAll: db.prepare(
+        `${selectBase} WHERE ts_min BETWEEN ? AND ? ORDER BY target ASC, ts_min ASC`
+      ),
+      rangeByTarget: db.prepare(
+        `${selectBase} WHERE ts_min BETWEEN ? AND ? AND target = ? ORDER BY ts_min ASC`
+      ),
+      recent: db.prepare(`${selectBase} WHERE ts_min >= ? ORDER BY ts_min ASC`),
+    };
+  }
+  return result;
 }
 
 function normalizeNumber(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function clampPercentage(value) {
+  const num = normalizeNumber(value);
+  if (num == null) {
+    return null;
+  }
+  if (num < 0) {
+    return 0;
+  }
+  if (num > 100) {
+    return 100;
+  }
+  return num;
 }
 
 function computePercentile(values, percentile) {
@@ -395,18 +459,43 @@ function computePercentile(values, percentile) {
   return lowerValue + (upperValue - lowerValue) * weight;
 }
 
-function computePingWindowSummary(samples, aggregates) {
+function computePingWindowSummary(samples, aggregates, { preferAggregated = false } = {}) {
   const result = {
     win_p95_ms: null,
     win_p50_ms: null,
     win_avg_ms: null,
     win_loss_pct: null,
     win_samples: 0,
+    win_availability_pct: null,
+    status: null,
   };
 
-  const safeSamples = Array.isArray(samples) ? samples : [];
   const safeAggregates = Array.isArray(aggregates) ? aggregates : [];
+  if (preferAggregated && safeAggregates.length > 0) {
+    const latest = safeAggregates.reduce((acc, entry) => {
+      if (!acc) {
+        return entry;
+      }
+      const currentTs = Number(entry?.ts_min);
+      const accTs = Number(acc?.ts_min);
+      return Number.isFinite(currentTs) && (!Number.isFinite(accTs) || currentTs > accTs) ? entry : acc;
+    });
 
+    const status = typeof latest?.status === "string" && latest.status.trim().length ? latest.status : "ok";
+    result.status = status;
+    result.win_samples = Number.isFinite(Number(latest?.sent)) ? Number(latest.sent) : 0;
+    if (status === "ok") {
+      result.win_loss_pct = clampPercentage(latest?.loss_pct);
+      result.win_avg_ms = normalizeNumber(latest?.avg_ms);
+      result.win_p50_ms = normalizeNumber(latest?.p50_ms);
+      result.win_p95_ms = normalizeNumber(latest?.p95_ms);
+      result.win_availability_pct = clampPercentage(latest?.availability_pct ?? (result.win_loss_pct == null ? null : 100 - result.win_loss_pct));
+    }
+
+    return result;
+  }
+
+  const safeSamples = Array.isArray(samples) ? samples : [];
   const successLatencies = safeSamples
     .filter((row) => Number(row.success) === 1)
     .map((row) => normalizeNumber(row.rtt_ms))
@@ -452,32 +541,76 @@ function computePingWindowSummary(samples, aggregates) {
     result.win_samples = successLatencies.length;
   }
 
-  if (!Number.isFinite(result.win_loss_pct)) {
-    result.win_loss_pct = null;
-  }
-  if (!Number.isFinite(result.win_avg_ms)) {
-    result.win_avg_ms = null;
-  }
-  if (!Number.isFinite(result.win_p50_ms)) {
-    result.win_p50_ms = null;
-  }
-  if (!Number.isFinite(result.win_p95_ms)) {
-    result.win_p95_ms = null;
-  }
+  result.status = result.win_samples > 0 ? "ok" : "insufficient";
+  result.win_loss_pct = clampPercentage(result.win_loss_pct);
+  result.win_avg_ms = normalizeNumber(result.win_avg_ms);
+  result.win_p50_ms = normalizeNumber(result.win_p50_ms);
+  result.win_p95_ms = normalizeNumber(result.win_p95_ms);
+  result.win_availability_pct = clampPercentage(
+    result.win_loss_pct == null ? null : 100 - result.win_loss_pct
+  );
 
   return result;
+}
+
+// Normalizes traceroute hops stored in the database to the API schema.
+// Executed whenever clients request the latest traceroute (roughly every few minutes).
+function normalizeTracerouteHop(raw, index) {
+  const hopNumber = Number(raw?.hop ?? raw?.index);
+  const hop = Number.isFinite(hopNumber) && hopNumber > 0 ? hopNumber : index + 1;
+  const ipCandidates = [raw?.ip, raw?.address, raw?.ipAddress]
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+  const ip = ipCandidates.length > 0 ? ipCandidates[0] : "*";
+
+  const latencyCandidates = [];
+  if (Array.isArray(raw?.rtt)) {
+    for (const value of raw.rtt) {
+      latencyCandidates.push(value);
+    }
+  }
+  latencyCandidates.push(raw?.rtt_ms, raw?.rtt1_ms, raw?.rtt2_ms, raw?.rtt3_ms);
+
+  const rtt = latencyCandidates
+    .map((value) => Number(value))
+    .find((value) => Number.isFinite(value) && value >= 0);
+
+  return { hop, ip: ip || "*", rtt_ms: rtt ?? null };
+}
+
+// Builds the traceroute payload expected by the UI and API consumers.
+// Runs on demand whenever a traceroute result is fetched.
+function buildTraceroutePayload(row) {
+  const ts = Number(row?.ts);
+  let parsedHops = [];
+  if (typeof row?.hops_json === "string") {
+    try {
+      const raw = JSON.parse(row.hops_json);
+      if (Array.isArray(raw)) {
+        parsedHops = raw;
+      }
+    } catch (error) {
+      parsedHops = [];
+    }
+  }
+
+  const normalizedHops = parsedHops.map((hop, index) => normalizeTracerouteHop(hop, index));
+
+  return {
+    id: Number.isFinite(Number(row?.id)) ? Number(row.id) : null,
+    target: typeof row?.target === "string" ? row.target : null,
+    success: Number(row?.success) === 1,
+    ts: Number.isFinite(ts) ? ts : null,
+    executed_at: Number.isFinite(ts) ? new Date(ts).toISOString() : null,
+    hops: normalizedHops,
+  };
 }
 
 function createRequestHandler(db, appConfig, options = {}) {
   const hasDb = db && typeof db.prepare === "function";
   const statements = hasDb
     ? {
-        pingWindowAll: db.prepare(
-          "SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? ORDER BY target ASC, ts_min ASC"
-        ),
-        pingWindowByTarget: db.prepare(
-          "SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? AND target = ? ORDER BY ts_min ASC"
-        ),
+        pingWindowTables: preparePingWindowStatements(db),
         pingSamplesByTargetRange: db.prepare(
           "SELECT ts, target, rtt_ms, success FROM ping_sample WHERE ts BETWEEN ? AND ? AND target = ? ORDER BY ts ASC"
         ),
@@ -485,10 +618,10 @@ function createRequestHandler(db, appConfig, options = {}) {
           "SELECT ts, target, rtt_ms, success FROM ping_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
         ),
         dnsSamplesAll: db.prepare(
-          "SELECT ts, hostname, resolver, lookup_ms, success FROM dns_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
+          "SELECT ts, hostname, resolver, lookup_ms, lookup_ms_hot, lookup_ms_cold, success, success_hot, success_cold FROM dns_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
         ),
         dnsSamplesByHostname: db.prepare(
-          "SELECT ts, hostname, resolver, lookup_ms, success FROM dns_sample WHERE ts BETWEEN ? AND ? AND hostname = ? ORDER BY ts ASC"
+          "SELECT ts, hostname, resolver, lookup_ms, lookup_ms_hot, lookup_ms_cold, success, success_hot, success_cold FROM dns_sample WHERE ts BETWEEN ? AND ? AND hostname = ? ORDER BY ts ASC"
         ),
         httpSamplesAll: db.prepare(
           "SELECT ts, url, status, ttfb_ms, total_ms, bytes, success FROM http_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
@@ -709,11 +842,15 @@ function createRequestHandler(db, appConfig, options = {}) {
         return;
       }
 
-      const { fromMs, toMs, rangeKey, durationMs } = resolveRangeWindow(
+      const { fromMs, toMs, rangeKey, durationMs, windowTable } = resolveRangeWindow(
         parsedUrl.searchParams.get("range")
       );
       const rawTarget = parsedUrl.searchParams.get("target");
       const target = typeof rawTarget === "string" ? rawTarget.trim() : "";
+      const windowStatementsMap = statements.pingWindowTables ?? {};
+      const resolvedTable = windowTable && windowStatementsMap[windowTable] ? windowTable : DEFAULT_WINDOW_TABLE;
+      const windowStatements = windowStatementsMap[resolvedTable] ?? null;
+      const preferAggregated = Boolean(windowTable && windowStatements && windowTable === resolvedTable);
 
       try {
         if (method === "HEAD") {
@@ -722,7 +859,9 @@ function createRequestHandler(db, appConfig, options = {}) {
         }
 
         if (target) {
-          const aggregates = statements.pingWindowByTarget.all(fromMs, toMs, target);
+          const aggregates = windowStatements
+            ? windowStatements.rangeByTarget.all(fromMs, toMs, target)
+            : [];
           const sampleRows = statements.pingSamplesByTargetRange
             ? statements.pingSamplesByTargetRange.all(fromMs, toMs, target)
             : [];
@@ -732,7 +871,7 @@ function createRequestHandler(db, appConfig, options = {}) {
             success: Number(row.success) === 1,
             rtt_ms: normalizeNumber(row.rtt_ms),
           }));
-          const summary = computePingWindowSummary(samples, aggregates);
+          const summary = computePingWindowSummary(samples, aggregates, { preferAggregated });
           sendJson(
             res,
             200,
@@ -747,7 +886,7 @@ function createRequestHandler(db, appConfig, options = {}) {
             { method }
           );
         } else {
-          const aggregates = statements.pingWindowAll.all(fromMs, toMs);
+          const aggregates = windowStatements ? windowStatements.rangeAll.all(fromMs, toMs) : [];
           const aggregateByTarget = new Map();
           for (const row of aggregates) {
             if (!aggregateByTarget.has(row.target)) {
@@ -778,7 +917,7 @@ function createRequestHandler(db, appConfig, options = {}) {
               target: entryTarget,
               range: rangeKey,
               windowMs: durationMs,
-              summary: computePingWindowSummary(samples, list),
+              summary: computePingWindowSummary(samples, list, { preferAggregated }),
               aggregates: list,
               samples,
             };
@@ -809,11 +948,21 @@ function createRequestHandler(db, appConfig, options = {}) {
           ? statements.dnsSamplesByHostname.all(fromMs, toMs, hostname)
           : statements.dnsSamplesAll.all(fromMs, toMs);
         const mapped = baseRows.map((row) => ({
-          ts: row.ts,
+          ts: Number(row.ts),
           hostname: row.hostname,
           resolver: row.resolver,
-          lookup_ms: row.lookup_ms,
-          success: row.success === 1,
+          lookup_ms: normalizeNumber(row.lookup_ms),
+          lookup_ms_hot: normalizeNumber(row.lookup_ms_hot),
+          lookup_ms_cold: normalizeNumber(row.lookup_ms_cold),
+          success: Number(row.success) === 1,
+          success_hot:
+            row.success_hot === undefined || row.success_hot === null
+              ? null
+              : Number(row.success_hot) === 1,
+          success_cold:
+            row.success_cold === undefined || row.success_cold === null
+              ? null
+              : Number(row.success_cold) === 1,
         }));
         sendJson(res, 200, mapped);
       } catch (error) {
@@ -879,28 +1028,8 @@ function createRequestHandler(db, appConfig, options = {}) {
           return;
         }
 
-        let hops = [];
-        try {
-          const parsed = JSON.parse(row.hops_json ?? "[]");
-          if (Array.isArray(parsed)) {
-            hops = parsed;
-          }
-        } catch (error) {
-          hops = [];
-        }
-
-        sendJson(
-          res,
-          200,
-          {
-            id: row.id,
-            ts: row.ts,
-            target: row.target,
-            success: row.success,
-            hops,
-          },
-          { method }
-        );
+        const payload = buildTraceroutePayload(row);
+        sendJson(res, 200, payload, { method });
       } catch (error) {
         sendJson(
           res,
@@ -933,23 +1062,8 @@ function createRequestHandler(db, appConfig, options = {}) {
             return;
           }
 
-          let hops = [];
-          try {
-            const parsed = JSON.parse(row.hops_json ?? "[]");
-            if (Array.isArray(parsed)) {
-              hops = parsed;
-            }
-          } catch (error) {
-            hops = [];
-          }
-
-          sendJson(res, 200, {
-            id: row.id,
-            ts: row.ts,
-            target: row.target,
-            success: row.success,
-            hops,
-          });
+          const payload = buildTraceroutePayload(row);
+          sendJson(res, 200, payload);
         } catch (error) {
           sendJson(res, 500, { error: error?.message ?? "Query failed" });
         }
@@ -1004,10 +1118,10 @@ export async function startServer({ host, port, db, signal, config, closeTimeout
     tracerouteMaxAgeMin: UI_TRACEROUTE_MAX_AGE_MIN,
     uiEwmaAlpha: config?.ui?.ewmaAlpha,
     thresholds: {
-      p95: { warn: THRESH_P95_WARN_MS, crit: THRESH_P95_CRIT_MS },
-      loss: { warn: THRESH_LOSS_WARN_PCT, crit: THRESH_LOSS_CRIT_PCT },
-      dns: { warn: THRESH_DNS_WARN_MS, crit: THRESH_DNS_CRIT_MS },
-      ttfb: { warn: THRESH_TTFB_WARN_MS, crit: THRESH_TTFB_CRIT_MS },
+      p95: deriveAlertThreshold(config?.alerts?.rttMs, THRESH_P95_WARN_MS, THRESH_P95_CRIT_MS),
+      loss: deriveAlertThreshold(config?.alerts?.lossPct, THRESH_LOSS_WARN_PCT, THRESH_LOSS_CRIT_PCT),
+      dns: deriveAlertThreshold(config?.alerts?.dnsMs, THRESH_DNS_WARN_MS, THRESH_DNS_CRIT_MS),
+      ttfb: buildThresholdPair(THRESH_TTFB_WARN_MS, THRESH_TTFB_CRIT_MS),
     },
   });
 

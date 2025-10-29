@@ -9,6 +9,13 @@ const WINDOWS = [
   { key: "win15m", duration: 15 * MINUTE_MS },
   { key: "win60m", duration: HOUR_MS },
 ];
+const WINDOW_KEY_TO_TABLE = Object.freeze({
+  win1m: "ping_window_1m",
+  win5m: "ping_window_5m",
+  win15m: "ping_window_15m",
+  win60m: "ping_window_60m",
+});
+const PING_WINDOW_TABLES = Object.freeze(Object.values(WINDOW_KEY_TO_TABLE));
 
 function computePercentile(values, percentile) {
   if (!values || values.length === 0) {
@@ -46,6 +53,46 @@ function average(values) {
 function normalizeNumber(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function clampPercentage(value) {
+  const num = normalizeNumber(value);
+  if (num == null) {
+    return null;
+  }
+  if (num < 0) {
+    return 0;
+  }
+  if (num > 100) {
+    return 100;
+  }
+  return num;
+}
+
+function preparePingWindowRecentStatements(db) {
+  const map = new Map();
+  for (const table of PING_WINDOW_TABLES) {
+    map.set(
+      table,
+      db.prepare(
+        `SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms, availability_pct, status FROM ${table} WHERE ts_min >= ? ORDER BY ts_min ASC`
+      )
+    );
+  }
+  return map;
+}
+
+function getWindowStatement(map, table) {
+  if (!map) {
+    return null;
+  }
+  if (map instanceof Map) {
+    return map.get(table) ?? null;
+  }
+  if (typeof map === "object" && map !== null) {
+    return map[table] ?? null;
+  }
+  return null;
 }
 
 function extractPingTargets({ configTargets, rawTargets, windowTargets }) {
@@ -94,14 +141,6 @@ function groupRowsByTarget(rows, mapper) {
   return map;
 }
 
-function computePingWindowsFromAggregates(rows, cutoffTs, useWindows) {
-  if (!useWindows) {
-    return [];
-  }
-  const cutoffMinute = Math.floor(cutoffTs / MINUTE_MS) * MINUTE_MS;
-  return rows.filter((row) => Number(row.ts_min) >= cutoffMinute);
-}
-
 function computePingWindowMetrics({
   now,
   duration,
@@ -116,119 +155,59 @@ function computePingWindowMetrics({
     p95_ms: null,
     p50_ms: null,
     loss_pct: null,
+    availability_pct: null,
     samples: 0,
+    status: "insufficient",
   };
 
-  const latencies = successEntries
-    .filter((entry) => entry.ts >= cutoff)
-    .map((entry) => entry.rtt)
-    .filter((value) => Number.isFinite(value));
-  result.p95_ms = computePercentile(latencies, 0.95);
-  result.p50_ms = computePercentile(latencies, 0.5);
-
-  if (useWindows && aggregateEntries.length > 0) {
-    const relevant = computePingWindowsFromAggregates(aggregateEntries, cutoff, true);
-    if (relevant.length === 0) {
-      // Fallback to raw data if the aggregated view has not caught up yet.
-      useWindows = false;
-    } else {
-      let sent = 0;
-      let received = 0;
-      let latencySum = 0;
-      let latencyCount = 0;
-      let percentileValues = [];
-
-      for (const entry of relevant) {
-        const sentCount = Number(entry.sent);
-        const receivedCount = Number(entry.received);
-        if (Number.isFinite(sentCount)) {
-          sent += sentCount;
-        }
-        if (Number.isFinite(receivedCount)) {
-          received += receivedCount;
-        }
-        const avgValue = normalizeNumber(entry.avg_ms);
-        if (avgValue !== null && Number.isFinite(receivedCount) && receivedCount > 0) {
-          latencySum += avgValue * receivedCount;
-          latencyCount += receivedCount;
-        }
-        const p50Value = normalizeNumber(entry.p50_ms);
-        if (p50Value !== null) {
-          percentileValues.push({
-            value: p50Value,
-            weight: Number.isFinite(receivedCount) ? receivedCount : 1,
-          });
-        }
-      }
-
-      result.samples = sent;
-      if (latencyCount > 0) {
-        result.avg_ms = latencySum / latencyCount;
-      }
-      if (percentileValues.length > 0) {
-        const weighted = percentileValues.reduce(
-          (acc, entry) => {
-            const weight = Number(entry.weight) > 0 ? Number(entry.weight) : 1;
-            acc.total += entry.value * weight;
-            acc.weight += weight;
-            return acc;
-          },
-          { total: 0, weight: 0 }
-        );
-        if (weighted.weight > 0) {
-          result.p50_ms = weighted.total / weighted.weight;
-        }
-      }
-      if (sent > 0) {
-        const effectiveReceived = Number.isFinite(received) ? received : 0;
-        result.loss_pct = ((sent - effectiveReceived) / sent) * 100;
-      }
-
-      if (result.samples === 0) {
-        result.samples = 0;
-        result.loss_pct = null;
-      }
-
-      return result;
+  if (useWindows && Array.isArray(aggregateEntries) && aggregateEntries.length > 0) {
+    const latest = aggregateEntries[aggregateEntries.length - 1];
+    const status =
+      typeof latest?.status === "string" && latest.status.trim().length ? latest.status : "ok";
+    result.status = status;
+    result.samples = Number.isFinite(Number(latest?.sent)) ? Number(latest.sent) : 0;
+    if (status === "ok") {
+      result.avg_ms = normalizeNumber(latest?.avg_ms);
+      result.p50_ms = normalizeNumber(latest?.p50_ms);
+      result.p95_ms = normalizeNumber(latest?.p95_ms);
+      result.loss_pct = clampPercentage(latest?.loss_pct);
+      result.availability_pct = clampPercentage(
+        latest?.availability_pct ?? (result.loss_pct == null ? null : 100 - result.loss_pct)
+      );
     }
+    return result;
   }
 
   const relevantRaw = rawEntries.filter((entry) => entry.ts >= cutoff);
   const samples = relevantRaw.length;
   result.samples = samples;
   if (samples === 0) {
-    result.loss_pct = null;
-    result.avg_ms = null;
-    if (!Number.isFinite(result.p50_ms ?? NaN)) {
-      result.p50_ms = null;
-    }
     return result;
   }
 
-  const successCount = relevantRaw.reduce((count, entry) => count + (entry.success ? 1 : 0), 0);
+  const successValues = relevantRaw.filter((entry) => entry.success && Number.isFinite(entry.rtt));
+  const successCount = successValues.length;
   if (successCount > 0) {
-    const successLatencies = relevantRaw
-      .filter((entry) => entry.success && Number.isFinite(entry.rtt))
-      .map((entry) => entry.rtt);
-    result.avg_ms = average(successLatencies);
+    const latencies = successValues.map((entry) => entry.rtt);
+    result.avg_ms = average(latencies);
+    result.p50_ms = computePercentile(latencies, 0.5);
+    result.p95_ms = computePercentile(latencies, 0.95);
   }
-  const percentileSource = relevantRaw
-    .filter((entry) => entry.success && Number.isFinite(entry.rtt))
-    .map((entry) => entry.rtt);
-  const median = computePercentile(percentileSource, 0.5);
-  if (Number.isFinite(median ?? NaN)) {
-    result.p50_ms = median;
-  }
-  result.loss_pct = ((samples - successCount) / samples) * 100;
-  if (!Number.isFinite(result.loss_pct)) {
-    result.loss_pct = null;
-  }
+
+  result.loss_pct = clampPercentage(((samples - successCount) / samples) * 100);
   if (!Number.isFinite(result.avg_ms ?? NaN)) {
     result.avg_ms = null;
   }
   if (!Number.isFinite(result.p50_ms ?? NaN)) {
     result.p50_ms = null;
   }
+  if (!Number.isFinite(result.p95_ms ?? NaN)) {
+    result.p95_ms = null;
+  }
+  result.availability_pct = clampPercentage(
+    result.loss_pct == null ? null : 100 - result.loss_pct
+  );
+  result.status = "ok";
 
   return result;
 }
@@ -240,24 +219,36 @@ function computePingMetrics({
   lastSampleStmt,
   recentStmt,
   successStmt,
-  windowStmt,
+  windowStmts,
   runtimeState,
   staleThresholdMs,
 }) {
   const since = now - HOUR_MS;
   const rawRows = recentStmt ? recentStmt.all(since) : [];
   const successRows = successStmt ? successStmt.all(since) : [];
-  const windowRows =
-    useWindows && windowStmt ? windowStmt.all(Math.floor(since / MINUTE_MS) * MINUTE_MS) : [];
+  const windowRowsByKey = new Map();
+  const aggregatedTargets = new Set();
+  if (useWindows && windowStmts) {
+    const cutoffMinute = Math.floor(since / MINUTE_MS) * MINUTE_MS;
+    for (const window of WINDOWS) {
+      const table = WINDOW_KEY_TO_TABLE[window.key];
+      const stmt = getWindowStatement(windowStmts, table);
+      const rows = stmt ? stmt.all(cutoffMinute) : [];
+      const grouped = groupRowsByTarget(rows, (row) => row.target);
+      windowRowsByKey.set(window.key, grouped);
+      for (const targetKey of grouped.keys()) {
+        aggregatedTargets.add(targetKey);
+      }
+    }
+  }
 
   const rawByTarget = groupRowsByTarget(rawRows, (row) => row.target);
   const successByTarget = groupRowsByTarget(successRows, (row) => row.target);
-  const windowByTarget = groupRowsByTarget(windowRows, (row) => row.target);
 
   const targets = extractPingTargets({
     configTargets,
     rawTargets: rawByTarget.keys(),
-    windowTargets: windowByTarget.keys(),
+    windowTargets: aggregatedTargets.values(),
   });
 
   const payload = {};
@@ -289,10 +280,11 @@ function computePingMetrics({
       ts: Number(row.ts),
       rtt: normalizeNumber(row.rtt_ms),
     }));
-    const aggregateEntries = windowByTarget.get(target) || [];
 
     const windowsPayload = {};
     for (const window of WINDOWS) {
+      const aggregateGroup = windowRowsByKey.get(window.key);
+      const aggregateEntries = aggregateGroup ? aggregateGroup.get(target) || [] : [];
       windowsPayload[window.key] = computePingWindowMetrics({
         now,
         duration: window.duration,
@@ -344,35 +336,66 @@ function computePingMetrics({
   return payload;
 }
 
-function computeDnsMetrics(rows, now) {
-  const successes = rows.filter(
-    (row) => Number(row.success) === 1 && Number.isFinite(Number(row.lookup_ms))
-  );
-  const last = successes.length > 0 ? successes[successes.length - 1] : null;
+// Normalizes DNS samples for the given mode (hot/cold).
+// Called on every live metrics refresh (a few times per minute).
+function extractDnsEntries(rows, valueKey, successKey) {
+  return rows
+    .filter((row) => Number(row[successKey]) === 1 && Number.isFinite(Number(row[valueKey])))
+    .map((row) => ({ ts: Number(row.ts), value: Number(row[valueKey]) }))
+    .filter((entry) => Number.isFinite(entry.ts) && Number.isFinite(entry.value))
+    .sort((a, b) => a.ts - b.ts);
+}
+
+// Builds rolling averages for DNS measurements within the live metrics window.
+// Invoked per mode (hot/cold) each time we push an SSE payload.
+function buildDnsStats(entries, now) {
+  const stats = {
+    last_ms: null,
+    win1m_avg_ms: null,
+    win5m_avg_ms: null,
+    win15m_avg_ms: null,
+    win60m_avg_ms: null,
+    samples: 0,
+  };
+
+  if (!entries || entries.length === 0) {
+    return stats;
+  }
+
   const cutoff1m = now - MINUTE_MS;
   const cutoff5m = now - 5 * MINUTE_MS;
   const cutoff15m = now - 15 * MINUTE_MS;
   const cutoff60m = now - HOUR_MS;
 
-  const collectValues = (cutoff) =>
-    successes
-      .filter((row) => Number(row.ts) >= cutoff)
-      .map((row) => Number(row.lookup_ms))
-      .filter((value) => Number.isFinite(value));
+  const collect = (cutoff) =>
+    entries.filter((entry) => Number(entry.ts) >= cutoff).map((entry) => entry.value);
 
-  const win1mValues = collectValues(cutoff1m);
-  const win5mValues = collectValues(cutoff5m);
-  const win15mValues = collectValues(cutoff15m);
-  const win60mValues = collectValues(cutoff60m);
+  const last = entries[entries.length - 1];
+  stats.last_ms = Number.isFinite(last?.value) ? last.value : null;
+  stats.win1m_avg_ms = average(collect(cutoff1m));
+  stats.win5m_avg_ms = average(collect(cutoff5m));
+  stats.win15m_avg_ms = average(collect(cutoff15m));
+  stats.win60m_avg_ms = average(collect(cutoff60m));
+  stats.samples = entries.length;
+
+  return stats;
+}
+
+function computeDnsMetrics(rows, now) {
+  const coldEntries = extractDnsEntries(rows, "lookup_ms_cold", "success_cold");
+  const hotEntries = extractDnsEntries(rows, "lookup_ms_hot", "success_hot");
+  const fallbackEntries = coldEntries.length > 0 ? coldEntries : hotEntries;
+
+  const coldStats = buildDnsStats(coldEntries, now);
+  const hotStats = buildDnsStats(hotEntries, now);
+  const primaryStats = buildDnsStats(fallbackEntries, now);
 
   return {
     aggregate: {
-      last_ms: last ? Number(last.lookup_ms) : null,
-      win1m_avg_ms: average(win1mValues),
-      win5m_avg_ms: average(win5mValues),
-      win15m_avg_ms: average(win15mValues),
-      win60m_avg_ms: average(win60mValues),
-      samples: win60mValues.length,
+      ...primaryStats,
+      mode: coldEntries.length > 0 ? "cold" : "hot",
+      cold: coldStats,
+      hot: hotStats,
     },
   };
 }
@@ -457,11 +480,9 @@ class LiveMetricsBroadcaster extends EventEmitter {
       pingSuccessRecent: this.db.prepare(
         "SELECT ts, target, rtt_ms FROM ping_sample WHERE success = 1 AND ts >= ? ORDER BY ts ASC"
       ),
-      pingWindowRecent: this.db.prepare(
-        "SELECT ts_min, target, sent, received, loss_pct, avg_ms FROM ping_window_1m WHERE ts_min >= ? ORDER BY ts_min ASC"
-      ),
+      pingWindowTables: preparePingWindowRecentStatements(this.db),
       dnsRecent: this.db.prepare(
-        "SELECT ts, lookup_ms, success FROM dns_sample WHERE ts >= ? ORDER BY ts ASC"
+        "SELECT ts, lookup_ms, lookup_ms_hot, lookup_ms_cold, success, success_hot, success_cold FROM dns_sample WHERE ts >= ? ORDER BY ts ASC"
       ),
       httpRecent: this.db.prepare(
         "SELECT ts, ttfb_ms, total_ms, success FROM http_sample WHERE ts >= ? ORDER BY ts ASC"
@@ -582,6 +603,23 @@ class LiveMetricsBroadcaster extends EventEmitter {
           win15m_avg_ms: null,
           win60m_avg_ms: null,
           samples: 0,
+          mode: "cold",
+          cold: {
+            last_ms: null,
+            win1m_avg_ms: null,
+            win5m_avg_ms: null,
+            win15m_avg_ms: null,
+            win60m_avg_ms: null,
+            samples: 0,
+          },
+          hot: {
+            last_ms: null,
+            win1m_avg_ms: null,
+            win5m_avg_ms: null,
+            win15m_avg_ms: null,
+            win60m_avg_ms: null,
+            samples: 0,
+          },
         },
       },
       http: {
@@ -617,7 +655,7 @@ class LiveMetricsBroadcaster extends EventEmitter {
       lastSampleStmt: this.statements.pingLastSample,
       recentStmt: this.statements.pingRecent,
       successStmt: this.statements.pingSuccessRecent,
-      windowStmt: this.statements.pingWindowRecent,
+      windowStmts: this.statements.pingWindowTables,
       runtimeState,
       staleThresholdMs: this.staleThresholdMs,
     });

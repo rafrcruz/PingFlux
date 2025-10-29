@@ -12,6 +12,7 @@ const DEFAULTS = Object.freeze({
   ENABLE_DNS: "true",
   ENABLE_HTTP: "true",
   PING_TARGETS: "3.174.59.117,8.8.8.8,1.1.1.1",
+  PINF_TARGET_DEFAULT: "",
   PING_INTERVAL_S: "60",
   PING_TIMEOUT_MS: "3000",
   PING_METHOD: "auto",
@@ -24,9 +25,11 @@ const DEFAULTS = Object.freeze({
   HTTP_URLS: "https://example.com",
   HTTP_INTERVAL_S: "60",
   HTTP_TIMEOUT_MS: "5000",
-  ALERT_P95_MS: "200",
-  ALERT_LOSS_PCT: "1.0",
+  ALERT_RTT_MS: "200",
+  ALERT_LOSS_PCT: "20",
+  ALERT_DNS_MS: "100",
   ALERT_MIN_POINTS: "10",
+  ENABLE_TRACEROUTE: "true",
   LIVE_PUSH_INTERVAL_MS: "2000",
   LIVE_USE_WINDOWS: "true",
   LIVE_STALE_MS: "10000",
@@ -82,6 +85,16 @@ function resolveVar(name, envFromFile) {
   }
 
   return DEFAULTS[name];
+}
+
+function resolveOptionalVar(name, envFromFile) {
+  if (process.env[name] !== undefined && process.env[name] !== "") {
+    return process.env[name];
+  }
+  if (envFromFile[name] !== undefined && envFromFile[name] !== "") {
+    return envFromFile[name];
+  }
+  return undefined;
 }
 
 function toInteger(value, fallback) {
@@ -191,11 +204,22 @@ export function getConfig() {
     resolveVar("ENABLE_HTTP", fileVariables),
     toBoolean(DEFAULTS.ENABLE_HTTP, true)
   );
+  const enableTraceroute = toBoolean(
+    resolveVar("ENABLE_TRACEROUTE", fileVariables),
+    toBoolean(DEFAULTS.ENABLE_TRACEROUTE, true)
+  );
 
-  const pingTargets = toStringList(
-    resolveVar("PING_TARGETS", fileVariables),
+  const rawPingTargets = resolveOptionalVar("PING_TARGETS", fileVariables);
+  let pingTargets = toStringList(
+    rawPingTargets ?? DEFAULTS.PING_TARGETS,
     DEFAULTS.PING_TARGETS.split(",")
   );
+  const fallbackPingTarget = String(
+    resolveOptionalVar("PINF_TARGET_DEFAULT", fileVariables) ?? DEFAULTS.PINF_TARGET_DEFAULT
+  ).trim();
+  if ((!rawPingTargets || String(rawPingTargets).trim() === "") && fallbackPingTarget) {
+    pingTargets = [fallbackPingTarget];
+  }
   const pingIntervalMs = toPositiveInteger(
     resolveVar("PING_INTERVAL_MS", fileVariables) ??
       Number(resolveVar("PING_INTERVAL_S", fileVariables) ?? DEFAULTS.PING_INTERVAL_S) * 1000,
@@ -277,13 +301,19 @@ export function getConfig() {
     Number(DEFAULTS.AGG_MAX_BATCH)
   );
 
-  const alertP95Ms = toNumber(
-    resolveVar("ALERT_P95_MS", fileVariables),
-    Number(DEFAULTS.ALERT_P95_MS)
+  const rawAlertRtt = resolveOptionalVar("ALERT_RTT_MS", fileVariables);
+  const rawLegacyAlertRtt = resolveOptionalVar("ALERT_P95_MS", fileVariables);
+  const alertRttMs = toNumber(
+    rawAlertRtt ?? rawLegacyAlertRtt ?? DEFAULTS.ALERT_RTT_MS,
+    Number(DEFAULTS.ALERT_RTT_MS)
   );
   const alertLossPct = toNumber(
-    resolveVar("ALERT_LOSS_PCT", fileVariables),
+    resolveOptionalVar("ALERT_LOSS_PCT", fileVariables) ?? DEFAULTS.ALERT_LOSS_PCT,
     Number(DEFAULTS.ALERT_LOSS_PCT)
+  );
+  const alertDnsMs = toNumber(
+    resolveOptionalVar("ALERT_DNS_MS", fileVariables) ?? DEFAULTS.ALERT_DNS_MS,
+    Number(DEFAULTS.ALERT_DNS_MS)
   );
   const alertMinPoints = toPositiveInteger(
     resolveVar("ALERT_MIN_POINTS", fileVariables),
@@ -300,6 +330,7 @@ export function getConfig() {
       enablePing,
       enableDns,
       enableHttp,
+      enableTraceroute,
     },
     ping: {
       targets: pingTargets,
@@ -337,8 +368,9 @@ export function getConfig() {
       ),
     },
     alerts: {
-      p95Ms: alertP95Ms,
+      rttMs: alertRttMs,
       lossPct: alertLossPct,
+      dnsMs: alertDnsMs,
       minPoints: alertMinPoints,
     },
   };

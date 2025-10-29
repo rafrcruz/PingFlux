@@ -1,18 +1,21 @@
 import fs from "fs";
 import path from "path";
 import dns from "dns";
+import { randomUUID } from "crypto";
 import { openDb, migrate } from "../storage/db.js";
 import * as logger from "../utils/logger.js";
 
 const DEFAULT_HOSTNAMES = ["google.com"];
 const DEFAULT_INTERVAL_S = 60;
 const DEFAULT_TIMEOUT_MS = 3000;
+const COLD_LOOKUP_INTERVAL_MS = 5 * 60 * 1000;
 
 const TIMEOUT_ERROR_CODE = "DNS_LOOKUP_TIMEOUT";
 
 let cachedSettings;
 let cachedEnvFileValues;
 let migrationsEnsured = false;
+const coldLookupState = new Map();
 
 function parseEnvFileOnce() {
   if (cachedEnvFileValues) {
@@ -172,40 +175,107 @@ function withTimeout(promise, timeoutMs, { signal } = {}) {
   });
 }
 
-export async function resolveOnce(hostname, { signal } = {}) {
-  const trimmedHost = String(hostname).trim();
-  const settings = getDnsSettings();
-  const ts = Date.now();
-  const sample = {
-    ts,
-    hostname: trimmedHost,
-    resolver: settings.resolver,
-    lookup_ms: null,
-    success: 0,
-  };
+// Determines whether a cold lookup should run for the hostname.
+// Called on every DNS cycle (typically once per minute).
+function shouldRunColdLookup(hostname, now, force) {
+  if (force) {
+    return true;
+  }
+  const last = coldLookupState.get(hostname);
+  if (!Number.isFinite(last)) {
+    return true;
+  }
+  return now - last >= COLD_LOOKUP_INTERVAL_MS;
+}
 
+// Stores the timestamp of the last cold lookup so we can respect the 5 minute cadence.
+function rememberColdLookup(hostname, ts) {
+  coldLookupState.set(hostname, ts);
+}
+
+// Generates a unique, cache-busting hostname for cold DNS lookups.
+// Invoked whenever a cold lookup is required (~every 5 minutes per target).
+function buildColdHostname(hostname) {
+  const suffix = String(hostname ?? "").trim();
+  if (!suffix) {
+    return suffix;
+  }
+  const prefix = `pingflux-${randomUUID()}`;
+  return `${prefix}.${suffix}`;
+}
+
+// Performs a single DNS lookup and measures the elapsed time.
+// Used for both hot and cold measurements within each cycle.
+async function performLookup(hostname, settings, { signal } = {}) {
+  const trimmedHost = String(hostname ?? "").trim();
   if (!trimmedHost) {
-    return sample;
+    return { success: false, durationMs: null };
   }
 
   const start = process.hrtime.bigint();
   try {
     await withTimeout(dns.promises.lookup(trimmedHost), settings.timeoutMs, { signal });
     const end = process.hrtime.bigint();
-    const durationMs = Number(end - start) / 1e6;
-    sample.lookup_ms = durationMs;
-    sample.success = 1;
+    return { success: true, durationMs: Number(end - start) / 1e6 };
   } catch (error) {
-    sample.lookup_ms = null;
-    sample.success = 0;
+    return { success: false, durationMs: null };
+  }
+}
+
+// Collects hot (cached) and optionally cold (cache-busting) measurements for a hostname.
+// Executed once per hostname on each collector cycle.
+async function measureHostname(hostname, settings, { signal, forceCold = false } = {}) {
+  const trimmedHost = String(hostname ?? "").trim();
+  const now = Date.now();
+  const sample = {
+    ts: now,
+    hostname: trimmedHost,
+    resolver: settings.resolver,
+    lookup_ms: null,
+    lookup_ms_hot: null,
+    lookup_ms_cold: null,
+    success: 0,
+    success_hot: null,
+    success_cold: null,
+  };
+
+  if (!trimmedHost) {
+    return { sample, coldExecuted: false };
   }
 
+  const hot = await performLookup(trimmedHost, settings, { signal });
+  sample.lookup_ms_hot = hot.durationMs;
+  sample.success_hot = hot.success ? 1 : 0;
+  sample.success = hot.success ? 1 : 0;
+
+  let coldExecuted = false;
+  if (shouldRunColdLookup(trimmedHost, now, forceCold)) {
+    const coldHostname = buildColdHostname(trimmedHost);
+    const cold = await performLookup(coldHostname, settings, { signal });
+    sample.lookup_ms_cold = cold.durationMs;
+    sample.success_cold = cold.success ? 1 : 0;
+    rememberColdLookup(trimmedHost, now);
+    coldExecuted = true;
+  }
+
+  sample.lookup_ms = sample.lookup_ms_cold ?? sample.lookup_ms_hot ?? null;
+  if (sample.success_hot == null) {
+    sample.success_hot = sample.success;
+  }
+
+  return { sample, coldExecuted };
+}
+
+export async function resolveOnce(hostname, { signal } = {}) {
+  const settings = getDnsSettings();
+  const { sample } = await measureHostname(hostname, settings, { signal, forceCold: true });
   return sample;
 }
 
 export async function measureCycle(hostnames, { signal } = {}) {
   ensureDbReady();
-  const providedList = Array.isArray(hostnames) ? hostnames : getDnsSettings().hostnames;
+  const settings = getDnsSettings();
+  const providedList = Array.isArray(hostnames) ? hostnames : settings.hostnames;
   const list = providedList.map((host) => String(host).trim()).filter((host) => host.length > 0);
 
   const samples = [];
@@ -215,15 +285,19 @@ export async function measureCycle(hostnames, { signal } = {}) {
       break;
     }
     try {
-      const sample = await resolveOnce(host, { signal });
+      const { sample } = await measureHostname(host, settings, { signal });
       samples.push(sample);
     } catch (error) {
       samples.push({
         ts: Date.now(),
         hostname: host,
-        resolver: getDnsSettings().resolver,
+        resolver: settings.resolver,
         lookup_ms: null,
+        lookup_ms_hot: null,
+        lookup_ms_cold: null,
         success: 0,
+        success_hot: 0,
+        success_cold: null,
       });
     }
   }
@@ -234,7 +308,7 @@ export async function measureCycle(hostnames, { signal } = {}) {
 
   const db = openDb();
   const insert = db.prepare(
-    "INSERT INTO dns_sample (ts, hostname, resolver, lookup_ms, success) VALUES (@ts, @hostname, @resolver, @lookup_ms, @success)"
+    "INSERT INTO dns_sample (ts, hostname, resolver, lookup_ms, lookup_ms_hot, lookup_ms_cold, success, success_hot, success_cold) VALUES (@ts, @hostname, @resolver, @lookup_ms, @lookup_ms_hot, @lookup_ms_cold, @success, @success_hot, @success_cold)"
   );
 
   const insertMany = db.transaction((rows) => {
@@ -244,7 +318,16 @@ export async function measureCycle(hostnames, { signal } = {}) {
         hostname: row.hostname,
         resolver: row.resolver,
         lookup_ms: row.lookup_ms,
+        lookup_ms_hot: row.lookup_ms_hot,
+        lookup_ms_cold: row.lookup_ms_cold,
         success: row.success ? 1 : 0,
+        success_hot: row.success_hot ?? (row.success ? 1 : 0),
+        success_cold:
+          row.success_cold === undefined || row.success_cold === null
+            ? null
+            : row.success_cold
+                ? 1
+                : 0,
       });
     }
   });
