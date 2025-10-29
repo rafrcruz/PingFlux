@@ -6,7 +6,8 @@ const HOUR_MS = 60 * MINUTE_MS;
 const WINDOWS = [
   { key: "win1m", duration: MINUTE_MS },
   { key: "win5m", duration: 5 * MINUTE_MS },
-  { key: "win1h", duration: HOUR_MS },
+  { key: "win15m", duration: 15 * MINUTE_MS },
+  { key: "win60m", duration: HOUR_MS },
 ];
 
 function computePercentile(values, percentile) {
@@ -350,7 +351,8 @@ function computeDnsMetrics(rows, now) {
   const last = successes.length > 0 ? successes[successes.length - 1] : null;
   const cutoff1m = now - MINUTE_MS;
   const cutoff5m = now - 5 * MINUTE_MS;
-  const cutoff1h = now - HOUR_MS;
+  const cutoff15m = now - 15 * MINUTE_MS;
+  const cutoff60m = now - HOUR_MS;
 
   const collectValues = (cutoff) =>
     successes
@@ -360,15 +362,17 @@ function computeDnsMetrics(rows, now) {
 
   const win1mValues = collectValues(cutoff1m);
   const win5mValues = collectValues(cutoff5m);
-  const win1hValues = collectValues(cutoff1h);
+  const win15mValues = collectValues(cutoff15m);
+  const win60mValues = collectValues(cutoff60m);
 
   return {
     aggregate: {
       last_ms: last ? Number(last.lookup_ms) : null,
       win1m_avg_ms: average(win1mValues),
       win5m_avg_ms: average(win5mValues),
-      win1h_avg_ms: average(win1hValues),
-      samples: win1hValues.length,
+      win15m_avg_ms: average(win15mValues),
+      win60m_avg_ms: average(win60mValues),
+      samples: win60mValues.length,
     },
   };
 }
@@ -376,7 +380,8 @@ function computeDnsMetrics(rows, now) {
 function computeHttpMetrics(rows, now) {
   const cutoff1m = now - MINUTE_MS;
   const cutoff5m = now - 5 * MINUTE_MS;
-  const cutoff1h = now - HOUR_MS;
+  const cutoff15m = now - 15 * MINUTE_MS;
+  const cutoff60m = now - HOUR_MS;
 
   const collectMetric = (key) => {
     const successes = rows.filter(
@@ -391,8 +396,12 @@ function computeHttpMetrics(rows, now) {
       .filter((row) => Number(row.ts) >= cutoff5m)
       .map((row) => Number(row[key]))
       .filter((value) => Number.isFinite(value));
-    const values1h = successes
-      .filter((row) => Number(row.ts) >= cutoff1h)
+    const values15m = successes
+      .filter((row) => Number(row.ts) >= cutoff15m)
+      .map((row) => Number(row[key]))
+      .filter((value) => Number.isFinite(value));
+    const values60m = successes
+      .filter((row) => Number(row.ts) >= cutoff60m)
       .map((row) => Number(row[key]))
       .filter((value) => Number.isFinite(value));
 
@@ -400,8 +409,9 @@ function computeHttpMetrics(rows, now) {
       last_ms: last ? Number(last[key]) : null,
       win1m_avg_ms: average(values1m),
       win5m_avg_ms: average(values5m),
-      win1h_avg_ms: average(values1h),
-      samples: values1h.length,
+      win15m_avg_ms: average(values15m),
+      win60m_avg_ms: average(values60m),
+      samples: values60m.length,
     };
   };
 
@@ -569,7 +579,8 @@ class LiveMetricsBroadcaster extends EventEmitter {
           last_ms: null,
           win1m_avg_ms: null,
           win5m_avg_ms: null,
-          win1h_avg_ms: null,
+          win15m_avg_ms: null,
+          win60m_avg_ms: null,
           samples: 0,
         },
       },
@@ -579,14 +590,16 @@ class LiveMetricsBroadcaster extends EventEmitter {
             last_ms: null,
             win1m_avg_ms: null,
             win5m_avg_ms: null,
-            win1h_avg_ms: null,
+            win15m_avg_ms: null,
+            win60m_avg_ms: null,
             samples: 0,
           },
           total: {
             last_ms: null,
             win1m_avg_ms: null,
             win5m_avg_ms: null,
-            win1h_avg_ms: null,
+            win15m_avg_ms: null,
+            win60m_avg_ms: null,
             samples: 0,
           },
         },
