@@ -1,12 +1,13 @@
 const DEFAULT_TOOLTIPS = Object.freeze({
-  pingP95: "RTT p95: 95% das amostras ficaram abaixo deste valor.",
+  pingP95: "95% das amostras têm RTT ≤ este valor; sensível a picos.",
   pingP50: "RTT p50: mediana do RTT para o alvo no último minuto.",
   pingAvg: "RTT médio no último minuto.",
-  pingLoss: "Perda de pacotes no último minuto.",
-  pingAvailability: "Disponibilidade estimada: 100 - perda (quanto maior, melhor).",
+  pingLoss: "% de pacotes sem resposta na janela.",
+  pingAvailability: "100 - perda; visão geral da estabilidade.",
   dnsLookup: "Tempo médio de resolução DNS no último minuto.",
   httpTtfb: "TTFB médio (1m): tempo até o primeiro byte nas verificações HTTP.",
   httpTotal: "Tempo total médio (1m) das verificações HTTP.",
+  noData: "Sem dados suficientes no período.",
 });
 
 function serializeConfig(config) {

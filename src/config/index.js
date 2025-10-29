@@ -11,7 +11,7 @@ const DEFAULTS = Object.freeze({
   ENABLE_PING: "true",
   ENABLE_DNS: "true",
   ENABLE_HTTP: "true",
-  PING_TARGETS: "8.8.8.8",
+  PING_TARGETS: "3.174.59.117,8.8.8.8,1.1.1.1",
   PING_INTERVAL_S: "60",
   PING_TIMEOUT_MS: "3000",
   PING_METHOD: "auto",
