@@ -1,7 +1,7 @@
 import http from "http";
 import { runTraceroute } from "../collectors/traceroute.js";
-import { renderIndexPage } from "./index-page.js";
 import { createLiveMetricsBroadcaster } from "./live-metrics.js";
+import { renderIndexPage } from "./index-page.js";
 
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
@@ -103,6 +103,7 @@ const RANGE_TO_DURATION_MS = {
 const RANGE_OPTIONS = Object.freeze(Object.keys(RANGE_TO_DURATION_MS));
 const UI_DEFAULT_TARGET = String(process.env.UI_DEFAULT_TARGET ?? "").trim();
 const SPARKLINE_RANGE_OPTIONS = Object.freeze([5, 10, 15]);
+const HEALTH_WINDOW_OPTIONS = Object.freeze(["1m", "5m", "1h"]);
 
 function parseFiniteNumber(value) {
   const num = Number(value);
@@ -119,6 +120,32 @@ function parseRetryInterval(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 3000;
 }
 
+function parseHealthWindow(value) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (HEALTH_WINDOW_OPTIONS.includes(normalized)) {
+    return normalized;
+  }
+  return "1m";
+}
+
+function parseMinPoints(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 10;
+}
+
+function describeWindowLabel(window) {
+  switch (window) {
+    case "1m":
+      return "1 minuto";
+    case "5m":
+      return "5 minutos";
+    case "1h":
+      return "1 hora";
+    default:
+      return window;
+  }
+}
+
 const UI_SPARKLINE_MINUTES = parseSparklineMinutes(process.env.UI_SPARKLINE_MINUTES);
 const UI_SSE_RETRY_MS = parseRetryInterval(process.env.UI_SSE_RETRY_MS);
 const THRESH_P95_WARN_MS = parseFiniteNumber(process.env.THRESH_P95_WARN_MS);
@@ -129,6 +156,8 @@ const THRESH_TTFB_WARN_MS = parseFiniteNumber(process.env.THRESH_TTFB_WARN_MS);
 const THRESH_TTFB_CRIT_MS = parseFiniteNumber(process.env.THRESH_TTFB_CRIT_MS);
 const THRESH_DNS_WARN_MS = parseFiniteNumber(process.env.THRESH_DNS_WARN_MS);
 const THRESH_DNS_CRIT_MS = parseFiniteNumber(process.env.THRESH_DNS_CRIT_MS);
+const HEALTH_EVAL_WINDOW = parseHealthWindow(process.env.HEALTH_EVAL_WINDOW);
+const HEALTH_REQUIRE_MIN_POINTS = parseMinPoints(process.env.HEALTH_REQUIRE_MIN_POINTS);
 
 function buildThresholdPair(warn, crit) {
   return {
@@ -140,6 +169,9 @@ function buildThresholdPair(warn, crit) {
 function getUiConfig(providedConfig) {
   const base = providedConfig && typeof providedConfig === "object" ? providedConfig : {};
   const thresholds = base.thresholds && typeof base.thresholds === "object" ? base.thresholds : {};
+  const baseHealth = base.health && typeof base.health === "object" ? base.health : {};
+  const healthWindow = parseHealthWindow(baseHealth.window ?? HEALTH_EVAL_WINDOW);
+  const healthMinPoints = parseMinPoints(baseHealth.requireMinPoints ?? HEALTH_REQUIRE_MIN_POINTS);
 
   return {
     defaultTarget: typeof base.defaultTarget === "string" ? base.defaultTarget : UI_DEFAULT_TARGET,
@@ -151,6 +183,11 @@ function getUiConfig(providedConfig) {
       loss: buildThresholdPair(thresholds.loss?.warn ?? THRESH_LOSS_WARN_PCT, thresholds.loss?.crit ?? THRESH_LOSS_CRIT_PCT),
       dns: buildThresholdPair(thresholds.dns?.warn ?? THRESH_DNS_WARN_MS, thresholds.dns?.crit ?? THRESH_DNS_CRIT_MS),
       ttfb: buildThresholdPair(thresholds.ttfb?.warn ?? THRESH_TTFB_WARN_MS, thresholds.ttfb?.crit ?? THRESH_TTFB_CRIT_MS),
+    },
+    health: {
+      window: healthWindow,
+      windowLabel: describeWindowLabel(healthWindow),
+      requireMinPoints: healthMinPoints,
     },
   };
 }
@@ -204,8 +241,6 @@ function createRequestHandler(db, appConfig, options = {}) {
       })
     : null;
 
-  const uiConfig = getUiConfig(appConfig);
-
   const handler = async (req, res) => {
     const { method, url } = req;
     if (!method || !url) {
@@ -234,7 +269,7 @@ function createRequestHandler(db, appConfig, options = {}) {
     }
 
     if (method === "GET" && parsedUrl.pathname === "/api/ui-config") {
-      sendJson(res, 200, uiConfig);
+      sendJson(res, 200, getUiConfig(appConfig));
       return;
     }
 
@@ -418,6 +453,7 @@ function createRequestHandler(db, appConfig, options = {}) {
     }
 
     if (method === "GET" && parsedUrl.pathname === "/") {
+      const uiConfig = getUiConfig(appConfig);
       sendHtml(res, 200, renderIndexPage(uiConfig));
       return;
     }
@@ -437,9 +473,20 @@ export async function startServer({
   closeTimeoutMs = 1500,
 }) {
   const parsedPort = Number.parseInt(String(port ?? 3030), 10);
-  const listenPort = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3030;
+  const configPort = Number.parseInt(config?.web?.port, 10);
+  const listenPort = Number.isFinite(parsedPort) && parsedPort > 0
+    ? parsedPort
+    : Number.isFinite(configPort) && configPort > 0
+      ? configPort
+      : 3030;
   const providedHost = typeof host === "string" ? host.trim() : "";
-  const listenHost = providedHost === "127.0.0.1" ? "127.0.0.1" : "127.0.0.1";
+  const configHost = typeof config?.web?.host === "string" ? config.web.host.trim() : "";
+  const requestedHost = providedHost || configHost;
+  const listenHost = requestedHost
+    ? requestedHost === "localhost"
+      ? "127.0.0.1"
+      : requestedHost
+    : "0.0.0.0";
 
   const appConfig = getUiConfig({
     defaultTarget: UI_DEFAULT_TARGET,
