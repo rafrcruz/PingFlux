@@ -19,11 +19,16 @@ const MIME_TYPES = Object.freeze({
   ".ico": "image/x-icon",
 });
 
-function sendJson(res, statusCode, payload) {
+function sendJson(res, statusCode, payload, options = {}) {
+  const { method } = options;
   const body = JSON.stringify(payload);
   res.statusCode = statusCode;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Content-Length", Buffer.byteLength(body));
+  if (method === "HEAD") {
+    res.end();
+    return;
+  }
   res.end(body);
 }
 
@@ -560,11 +565,11 @@ function createRequestHandler(db, appConfig, options = {}) {
     }
 
     if (
-      method === "GET" &&
+      (method === "GET" || method === "HEAD") &&
       (parsedUrl.pathname === "/api/ping/window" || parsedUrl.pathname === "/v1/api/ping/window")
     ) {
       if (!statements) {
-        sendJson(res, 500, { error: "Database unavailable" });
+        sendJson(res, 500, { error: "Database unavailable" }, { method });
         return;
       }
 
@@ -575,7 +580,7 @@ function createRequestHandler(db, appConfig, options = {}) {
       try {
         if (target) {
           const rows = statements.pingWindowByTarget.all(fromMs, toMs, target);
-          sendJson(res, 200, rows);
+          sendJson(res, 200, rows, { method });
         } else {
           const rows = statements.pingWindowAll.all(fromMs, toMs);
           const grouped = Object.create(null);
@@ -585,10 +590,10 @@ function createRequestHandler(db, appConfig, options = {}) {
             }
             grouped[row.target].push(row);
           }
-          sendJson(res, 200, grouped);
+          sendJson(res, 200, grouped, { method });
         }
       } catch (error) {
-        sendJson(res, 500, { error: error?.message ?? "Query failed" });
+        sendJson(res, 500, { error: error?.message ?? "Query failed" }, { method });
       }
       return;
     }
