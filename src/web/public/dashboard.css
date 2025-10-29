@@ -946,12 +946,6 @@ body {
   flex-shrink: 0;
 }
 
-.paused {
-  background: rgba(248, 81, 73, 0.18);
-  border-color: rgba(248, 81, 73, 0.32);
-  color: var(--critical);
-}
-
 body.is-medium {
   --grid-gap: clamp(14px, 2vw, 20px);
 }
