@@ -663,26 +663,26 @@ function createRequestHandler(db, appConfig, options = {}) {
     }
 
     if (
-      method === "GET" &&
+      (method === "GET" || method === "HEAD") &&
       (parsedUrl.pathname === "/api/traceroute/latest" ||
         parsedUrl.pathname === "/v1/api/traceroute/latest")
     ) {
       if (!statements) {
-        sendJson(res, 500, { error: "Database unavailable" });
+        sendJson(res, 500, { error: "Database unavailable" }, { method });
         return;
       }
 
       const rawTarget = parsedUrl.searchParams.get("target");
       const target = typeof rawTarget === "string" ? rawTarget.trim() : "";
       if (!target) {
-        sendJson(res, 400, { error: "Target required" });
+        sendJson(res, 400, { error: "Target required" }, { method });
         return;
       }
 
       try {
         const row = statements.tracerouteLatestByTarget.get(target);
         if (!row) {
-          sendJson(res, 404, { error: "Traceroute not found" });
+          sendJson(res, 404, { error: "Traceroute not found" }, { method });
           return;
         }
 
@@ -696,15 +696,25 @@ function createRequestHandler(db, appConfig, options = {}) {
           hops = [];
         }
 
-        sendJson(res, 200, {
-          id: row.id,
-          ts: row.ts,
-          target: row.target,
-          success: row.success,
-          hops,
-        });
+        sendJson(
+          res,
+          200,
+          {
+            id: row.id,
+            ts: row.ts,
+            target: row.target,
+            success: row.success,
+            hops,
+          },
+          { method }
+        );
       } catch (error) {
-        sendJson(res, 500, { error: error?.message ?? "Query failed" });
+        sendJson(
+          res,
+          500,
+          { error: error?.message ?? "Query failed" },
+          { method }
+        );
       }
       return;
     }
