@@ -1,10 +1,12 @@
 const DEFAULT_TOOLTIPS = Object.freeze({
-  pingP95: "p95: 95% das amostras tiveram RTT menor ou igual a este valor; bom para ver picos.",
-  pingAvg: "RTT médio: tempo médio de resposta no último minuto.",
-  pingLoss: "Perda: % de pacotes que não retornaram no período.",
-  pingAvailability: "Disponibilidade: estimativa de 100 - perda; quanto maior, melhor.",
-  dnsLookup: "DNS lookup (1m): tempo médio de resolução DNS no último minuto.",
-  httpTtfb: "TTFB (1m): tempo médio até o primeiro byte nas verificações HTTP.",
+  pingP95: "RTT p95: 95% das amostras ficaram abaixo deste valor.",
+  pingP50: "RTT p50: mediana do RTT para o alvo no último minuto.",
+  pingAvg: "RTT médio no último minuto.",
+  pingLoss: "Perda de pacotes no último minuto.",
+  pingAvailability: "Disponibilidade estimada: 100 - perda (quanto maior, melhor).",
+  dnsLookup: "Tempo médio de resolução DNS no último minuto.",
+  httpTtfb: "TTFB médio (1m): tempo até o primeiro byte nas verificações HTTP.",
+  httpTotal: "Tempo total médio (1m) das verificações HTTP.",
 });
 
 function serializeConfig(config) {
@@ -16,9 +18,14 @@ function serializeConfig(config) {
     .replace(/\u2029/g, "\\u2029");
 }
 
-function resolveSparklineMinutes(configMinutes) {
-  const minutes = Number.parseInt(configMinutes, 10);
-  return Number.isFinite(minutes) && minutes > 0 ? minutes : 15;
+function resolveRangeOptions(config) {
+  const defaults = [5, 10, 15, 30];
+  const provided = Array.isArray(config?.rangeOptions) ? config.rangeOptions : [];
+  const values = provided
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const merged = [...new Set([...defaults, ...values])].sort((a, b) => a - b);
+  return merged.length ? merged : defaults;
 }
 
 export function renderIndexPage(uiConfig, options = {}) {
@@ -26,676 +33,322 @@ export function renderIndexPage(uiConfig, options = {}) {
   const tooltips = options.tooltips && typeof options.tooltips === "object"
     ? { ...DEFAULT_TOOLTIPS, ...options.tooltips }
     : DEFAULT_TOOLTIPS;
-  const sparklineMinutes = resolveSparklineMinutes(resolvedConfig.sparklineMinutes);
-  const encodedConfig = serializeConfig(resolvedConfig);
+  const encodedConfig = serializeConfig({
+    ...resolvedConfig,
+    rangeOptions: resolveRangeOptions(resolvedConfig),
+  });
+  const encodedTooltips = serializeConfig(tooltips);
 
-  const healthConfig = resolvedConfig.health && typeof resolvedConfig.health === "object" ? resolvedConfig.health : {};
-  const healthWindowLabel = typeof healthConfig.windowLabel === "string" ? healthConfig.windowLabel : "1 minuto";
-  const healthMinPoints = Number.isFinite(healthConfig.requireMinPoints) ? healthConfig.requireMinPoints : 10;
+  const themeBootstrap = `(()=>{try{const t=localStorage.getItem('pingflux-theme')==='light'?'light':'dark';document.documentElement.dataset.theme=t;document.documentElement.classList.add('theme-'+t);}catch(e){document.documentElement.dataset.theme='dark';document.documentElement.classList.add('theme-dark');}})();`;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PingFlux · Live</title>
-    <style>
-      :root {
-        color-scheme: dark;
-        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        line-height: 1.45;
-        background-color: #0b1120;
-      }
-
-      body {
-        margin: 0;
-        padding: 0;
-        background: radial-gradient(circle at top, rgba(56, 189, 248, 0.08), transparent 55%), #0b1120;
-        color: #e2e8f0;
-      }
-
-      main {
-        max-width: 1180px;
-        margin: 0 auto;
-        padding: 32px 20px 64px;
-        display: flex;
-        flex-direction: column;
-        gap: 24px;
-      }
-
-      .health-card {
-        position: sticky;
-        top: 0;
-        z-index: 20;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-        padding: 20px;
-        border-radius: 18px;
-        border: 1px solid rgba(148, 163, 184, 0.28);
-        background: rgba(15, 23, 42, 0.88);
-        box-shadow: 0 24px 60px rgba(15, 23, 42, 0.45);
-        backdrop-filter: blur(6px);
-      }
-
-      .health-header {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: space-between;
-        align-items: center;
-        gap: 16px;
-      }
-
-      .health-status-group {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-      }
-
-      .health-meta {
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-
-      .health-meta strong {
-        color: #f8fafc;
-      }
-
-      .health-title {
-        font-size: 1rem;
-        font-weight: 600;
-        letter-spacing: 0.01em;
-      }
-
-      .health-badge {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 150px;
-        padding: 10px 18px;
-        border-radius: 999px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        font-size: 0.9rem;
-        border: 1px solid rgba(148, 163, 184, 0.25);
-        background: rgba(15, 23, 42, 0.85);
-        color: #e2e8f0;
-        transition: all 0.2s ease;
-      }
-
-      .health-badge.ok {
-        border-color: rgba(34, 197, 94, 0.7);
-        background: rgba(34, 197, 94, 0.16);
-        color: #4ade80;
-      }
-
-      .health-badge.warn {
-        border-color: rgba(234, 179, 8, 0.7);
-        background: rgba(234, 179, 8, 0.16);
-        color: #facc15;
-      }
-
-      .health-badge.crit {
-        border-color: rgba(248, 113, 113, 0.8);
-        background: rgba(248, 113, 113, 0.16);
-        color: #f87171;
-      }
-
-      .health-badge.insufficient {
-        border-color: rgba(148, 163, 184, 0.4);
-        background: rgba(148, 163, 184, 0.12);
-        color: rgba(203, 213, 225, 0.95);
-      }
-
-      .health-note {
-        margin: 0;
-        font-size: 0.88rem;
-        color: rgba(203, 213, 225, 0.9);
-      }
-
-      .health-reasons {
-        margin: 0;
-        padding-left: 18px;
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        font-size: 0.88rem;
-        color: #e2e8f0;
-      }
-
-      .health-reasons li {
-        list-style: disc;
-      }
-
-      .health-reasons li.warn {
-        color: #facc15;
-      }
-
-      .health-reasons li.crit {
-        color: #f87171;
-      }
-
-      .health-reasons li.muted {
-        color: #94a3b8;
-      }
-
-      header {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: space-between;
-        gap: 16px;
-        align-items: flex-end;
-      }
-
-      h1 {
-        margin: 0;
-        font-size: clamp(2rem, 3vw, 2.6rem);
-        font-weight: 600;
-        letter-spacing: -0.02em;
-      }
-
-      .subtitle {
-        margin: 4px 0 0;
-        color: rgba(148, 163, 184, 0.9);
-        font-size: 0.95rem;
-      }
-
-      .status-panel {
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-        align-items: flex-end;
-        min-width: 200px;
-      }
-
-      .status {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 12px;
-        border-radius: 999px;
-        font-size: 0.82rem;
-        font-weight: 500;
-        border: 1px solid rgba(34, 197, 94, 0.4);
-        background: rgba(34, 197, 94, 0.12);
-        color: #34d399;
-        transition: all 0.2s ease;
-      }
-
-      .status.connecting {
-        border-color: rgba(59, 130, 246, 0.4);
-        background: rgba(59, 130, 246, 0.12);
-        color: #60a5fa;
-      }
-
-      .status.reconnecting {
-        border-color: rgba(250, 204, 21, 0.5);
-        background: rgba(250, 204, 21, 0.12);
-        color: #facc15;
-      }
-
-      .last-update {
-        font-size: 0.85rem;
-        color: #94a3b8;
-      }
-
-      .controls {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 16px;
-        align-items: flex-end;
-      }
-
-      label {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        font-size: 0.85rem;
-        color: #94a3b8;
-      }
-
-      select {
-        appearance: none;
-        padding: 8px 12px;
-        border-radius: 8px;
-        border: 1px solid rgba(148, 163, 184, 0.35);
-        background: rgba(15, 23, 42, 0.9);
-        color: inherit;
-        font-size: 0.95rem;
-        min-width: 170px;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-      }
-
-      select:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
-      }
-
-      .kpi-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 16px;
-      }
-
-      .kpi-card {
-        background: rgba(15, 23, 42, 0.82);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 14px;
-        padding: 16px;
-        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
-        transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
-      }
-
-      .kpi-card.warn {
-        border-color: rgba(250, 204, 21, 0.9);
-        background: rgba(250, 204, 21, 0.08);
-      }
-
-      .kpi-card.crit {
-        border-color: rgba(239, 68, 68, 0.95);
-        background: rgba(239, 68, 68, 0.1);
-      }
-
-      .kpi-label {
-        font-size: 0.82rem;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: rgba(148, 163, 184, 0.85);
-      }
-
-      .kpi-value {
-        margin-top: 10px;
-        font-size: clamp(1.7rem, 3vw, 2.3rem);
-        font-weight: 600;
-        color: #f8fafc;
-      }
-
-      .section-card {
-        background: rgba(15, 23, 42, 0.82);
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 16px;
-        padding: 20px;
-        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
-      }
-
-      .interpretation-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 16px;
-      }
-
-      .interpretation-card {
-        border: 1px solid rgba(148, 163, 184, 0.18);
-        border-radius: 14px;
-        padding: 16px;
-        background: rgba(15, 23, 42, 0.74);
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-
-      .interpretation-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-      }
-
-      .interpretation-header h3 {
-        margin: 0;
-        font-size: 1rem;
-        font-weight: 600;
-      }
-
-      .help-icon {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 24px;
-        height: 24px;
-        border-radius: 999px;
-        border: 1px solid rgba(148, 163, 184, 0.4);
-        font-size: 0.75rem;
-        font-weight: 600;
-        color: rgba(148, 163, 184, 0.9);
-        background: rgba(30, 41, 59, 0.9);
-        cursor: help;
-      }
-
-      .interpretation-card p {
-        margin: 0;
-        color: rgba(226, 232, 240, 0.88);
-        font-size: 0.92rem;
-      }
-
-      .section-header {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-        margin-bottom: 12px;
-      }
-
-      .section-header h2 {
-        margin: 0;
-        font-size: 1.2rem;
-        font-weight: 600;
-      }
-
-      .sparkline-chart {
-        position: relative;
-        width: 100%;
-        height: 160px;
-      }
-
-      #sparkline {
-        width: 100%;
-        height: 100%;
-        display: block;
-      }
-
-      #sparkline-empty {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #94a3b8;
-        font-size: 0.95rem;
-      }
-
-      .sparkline-legend {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 16px;
-        font-size: 0.78rem;
-        color: #94a3b8;
-        margin-top: 12px;
-      }
-
-      .legend-item {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-      }
-
-      .legend-dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-        display: inline-block;
-      }
-
-      .legend-dot.avg {
-        background: #38bdf8;
-      }
-
-      .legend-dot.p95 {
-        background: #34d399;
-      }
-
-      @media (max-width: 640px) {
-        .status-panel {
-          align-items: flex-start;
-        }
-
-        .health-card {
-          top: 0;
-        }
-
-        .kpi-grid {
-          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        }
-
-        .kpi-value {
-          font-size: 1.8rem;
-        }
-      }
-    </style>
+    <title>PingFlux · Observabilidade em tempo real</title>
+    <meta name="theme-color" content="#0b1120" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
+    <script>${themeBootstrap}</script>
+    <link rel="stylesheet" href="/public/dashboard.css" />
+    <script defer src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script type="module" defer src="/public/dashboard.js"></script>
   </head>
   <body>
-    <main>
-      <section id="health-panel" class="health-card" aria-live="polite">
-        <div class="health-header">
-          <div class="health-status-group">
-            <span id="health-status" class="health-badge insufficient">Dados insuficientes</span>
-            <div class="health-meta">
-              <span class="health-title">Painel de Saúde</span>
-              <span class="health-window">Janela avaliada: <strong id="health-window-label">${healthWindowLabel}</strong></span>
-            </div>
+    <div class="page-shell">
+      <header class="app-header" role="banner">
+        <div class="brand" aria-label="PingFlux">
+          <span class="brand-icon" aria-hidden="true">
+            <svg viewBox="0 0 64 64" focusable="false">
+              <path d="M8 34c6 0 6-18 12-18s6 32 12 32 6-44 12-44 6 38 12 38" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </span>
+          <div class="brand-text">
+            <span class="brand-title">PingFlux</span>
+            <span class="brand-subtitle">Live Network Intelligence</span>
           </div>
-          <span class="last-update">Última atualização: <strong id="health-last-update">—</strong></span>
         </div>
-        <p id="health-note" class="health-note">Aguardando dados recentes · mín. ${healthMinPoints} pontos</p>
-        <ul id="health-reasons" class="health-reasons">
-          <li class="muted">Aguardando atualização do canal ao vivo.</li>
-        </ul>
-      </section>
-
-      <header>
-        <div>
-          <h1>PingFlux</h1>
-          <p class="subtitle">Dashboard de latência em tempo real.</p>
-        </div>
-        <div class="status-panel">
-          <span id="connection-status" class="status connecting">Conectando…</span>
-          <span class="last-update">Última atualização: <strong id="last-update">—</strong></span>
+        <div class="header-actions">
+          <button id="themeToggle" class="toggle-theme" aria-label="Alternar tema" aria-live="polite">
+            <span class="icon moon" aria-hidden="true"></span>
+            <span class="icon sun" aria-hidden="true"></span>
+          </button>
+          <div class="live-indicator" role="status" aria-live="polite">
+            <span id="connectionDot" class="status-dot status-dot--connecting" aria-hidden="true"></span>
+            <span id="connectionText">Conectando…</span>
+          </div>
+          <time id="lastUpdate" class="last-update" datetime="">Última atualização: —</time>
         </div>
       </header>
 
-      <section class="controls" aria-label="Controles do dashboard">
-        <label>
-          Target
-          <select id="target-select" name="target" disabled>
-            <option value="" disabled selected>Carregando…</option>
-          </select>
+      <section class="controls" role="region" aria-label="Controles do dashboard">
+        <label class="control select-control">
+          <span class="control-label">Alvo de ping</span>
+          <select id="targetSelect" aria-label="Selecionar alvo de ping" disabled></select>
         </label>
-        <label>
-          Range visual
-          <select id="range-select" name="range"></select>
-        </label>
+        <div class="control range-control" role="group" aria-label="Janela visual">
+          <span class="control-label">Janela visual</span>
+          <div id="rangeButtons" class="range-buttons" role="group"></div>
+        </div>
+        <button id="pauseStream" class="control ghost-button" aria-pressed="false">Pausar stream</button>
       </section>
 
-      <section class="kpi-grid" aria-live="polite">
-        <div class="kpi-card" data-kpi="ping-p95" title="${tooltips.pingP95}">
-          <span class="kpi-label">RTT p95 (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="ping-avg" title="${tooltips.pingAvg}">
-          <span class="kpi-label">RTT médio (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="ping-loss" title="${tooltips.pingLoss}">
-          <span class="kpi-label">Perda (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="ping-availability" title="${tooltips.pingAvailability}">
-          <span class="kpi-label">Disponibilidade (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="dns-lookup" title="${tooltips.dnsLookup}">
-          <span class="kpi-label">DNS lookup (1m)</span>
-          <span class="kpi-value">—</span>
-        </div>
-        <div class="kpi-card" data-kpi="http-ttfb" title="${tooltips.httpTtfb}">
-          <span class="kpi-label">TTFB (1m)</span>
-          <span class="kpi-value">—</span>
+      <section class="kpi-section" aria-label="Indicadores principais">
+        <div class="kpi-grid">
+          <article class="kpi-card" data-kpi="ping-p95">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 19h16M4 14l4-4 4 4 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">RTT p95 (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingP95" aria-label="Ajuda RTT p95">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-p95">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-p95">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="ping-p50">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 17l6-6 4 4 6-10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">RTT p50 (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingP50" aria-label="Ajuda RTT p50">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-p50">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-p50">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="ping-avg">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 13l4-6 4 3 4-7 4 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">RTT médio (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingAvg" aria-label="Ajuda RTT médio">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-avg">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-avg">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="ping-loss">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M19 5l-7 14-4-7-5 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">Perda (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingLoss" aria-label="Ajuda perda">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-loss">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-loss">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="ping-availability">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2v4m0 12v4m-8-8h4m8 0h4m-3.5-6.5l-2.8 2.8M8.3 8.3L5.5 5.5m0 12.9l2.8-2.8m8.9 0l2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">Disponibilidade (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="pingAvailability" aria-label="Ajuda disponibilidade">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="ping-availability">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="ping-availability">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="dns-lookup">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M3 5h8v6H3zm10 0h8v6h-8zM3 13h8v6H3zm10 6v-6h8v6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">DNS lookup (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="dnsLookup" aria-label="Ajuda DNS">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="dns-lookup">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="dns-lookup">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="http-ttfb">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M5 12h14M12 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">TTFB (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="httpTtfb" aria-label="Ajuda TTFB">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="http-ttfb">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="http-ttfb">Sem dados</span>
+            </div>
+          </article>
+
+          <article class="kpi-card" data-kpi="http-total">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 4h7l3 6h6l-3 10H6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">HTTP total (1m)</span>
+                  <button class="kpi-help" type="button" data-tooltip="httpTotal" aria-label="Ajuda tempo total">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="http-total">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-foot">
+              <span class="kpi-sub" data-sub="http-total">Sem dados</span>
+            </div>
+          </article>
         </div>
       </section>
 
-      <section class="section-card" aria-label="Guia de interpretação das métricas">
-        <div class="section-header">
-          <h2>Como interpretar</h2>
-        </div>
-        <div class="interpretation-grid">
-          <article class="interpretation-card">
-            <div class="interpretation-header">
-              <h3>RTT p95</h3>
-              <span class="help-icon" role="img" aria-label="Ajuda" title="p95: 95% das amostras têm RTT ≤ este valor; sensível a picos.">?</span>
+      <main class="dashboard-grid" id="dashboardRoot">
+        <section class="panel panel-large" aria-label="Séries temporais de ping">
+          <div class="panel-header">
+            <h2>Latência e perda</h2>
+            <div class="panel-actions">
+              <label class="checkbox">
+                <input type="checkbox" id="lossToggle" checked aria-label="Alternar série de perda" />
+                <span>Exibir perda (%)</span>
+              </label>
+              <button id="resetZoom" class="ghost-button" type="button">Reset zoom</button>
             </div>
-            <p>Valor que 95% das amostras não ultrapassam; ótimo para identificar picos de latência.</p>
-          </article>
-          <article class="interpretation-card">
-            <div class="interpretation-header">
-              <h3>RTT médio</h3>
-              <span class="help-icon" role="img" aria-label="Ajuda" title="RTT médio: tempo médio de resposta no último minuto.">?</span>
+          </div>
+          <div id="latencyChart" class="chart chart-large" role="img" aria-label="Gráfico de RTT"></div>
+        </section>
+
+        <section class="panel panel-medium" aria-label="Heatmap RTT">
+          <div class="panel-header">
+            <h2>Heatmap RTT p95</h2>
+          </div>
+          <div id="heatmapChart" class="chart chart-medium" role="img" aria-label="Heatmap RTT"></div>
+        </section>
+
+        <section class="panel panel-gauge" aria-label="Disponibilidade">
+          <div class="panel-header">
+            <h2>Disponibilidade (1m)</h2>
+          </div>
+          <div id="availabilityGauge" class="chart chart-gauge" role="img" aria-label="Gauge de disponibilidade"></div>
+        </section>
+
+        <section class="panel panel-mini" aria-label="DNS Lookup">
+          <div class="panel-header">
+            <h2>DNS Lookup</h2>
+            <span class="panel-subtitle">Últimos 60 min</span>
+          </div>
+          <div id="dnsSparkline" class="chart chart-mini" role="img" aria-label="Série de lookup DNS"></div>
+        </section>
+
+        <section class="panel panel-mini" aria-label="HTTP TTFB">
+          <div class="panel-header">
+            <h2>HTTP TTFB</h2>
+            <span class="panel-subtitle">Últimos 60 min</span>
+          </div>
+          <div id="httpTtfbSparkline" class="chart chart-mini" role="img" aria-label="Série de TTFB"></div>
+        </section>
+
+        <section class="panel panel-mini" aria-label="HTTP Tempo total">
+          <div class="panel-header">
+            <h2>HTTP Tempo total</h2>
+            <span class="panel-subtitle">Últimos 60 min</span>
+          </div>
+          <div id="httpTotalSparkline" class="chart chart-mini" role="img" aria-label="Série de tempo total HTTP"></div>
+        </section>
+
+        <section class="panel panel-events" aria-label="Eventos e alertas">
+          <div class="panel-header">
+            <h2>Eventos recentes</h2>
+          </div>
+          <ul id="eventList" class="event-list" aria-live="polite"></ul>
+        </section>
+
+        <section class="panel panel-traceroute" aria-label="Último traceroute">
+          <div class="panel-header">
+            <div>
+              <h2>Último traceroute</h2>
+              <span class="panel-subtitle" id="tracerouteMeta">Sem execuções</span>
             </div>
-            <p>Tempo médio de ida e volta no período; indica o comportamento geral das rotas.</p>
-          </article>
-          <article class="interpretation-card">
-            <div class="interpretation-header">
-              <h3>Perda</h3>
-              <span class="help-icon" role="img" aria-label="Ajuda" title="Perda: % de pacotes que não retornaram no período.">?</span>
-            </div>
-            <p>Percentual de pacotes sem resposta; acima de 1% já pode degradar chamadas e APIs.</p>
-          </article>
-          <article class="interpretation-card">
-            <div class="interpretation-header">
-              <h3>Disponibilidade</h3>
-              <span class="help-icon" role="img" aria-label="Ajuda" title="Disponibilidade: estimativa de 100 - perda; quanto maior, melhor.">?</span>
-            </div>
-            <p>Estimativa de 100 - perda; usada como visão geral da saúde de rede do alvo.</p>
-          </article>
-          <article class="interpretation-card">
-            <div class="interpretation-header">
-              <h3>DNS Lookup</h3>
-              <span class="help-icon" role="img" aria-label="Ajuda" title="DNS lookup (1m): tempo médio de resolução DNS no último minuto.">?</span>
-            </div>
-            <p>Tempo para resolver o nome do host; latências altas atrasam o início das conexões.</p>
-          </article>
-          <article class="interpretation-card">
-            <div class="interpretation-header">
-              <h3>TTFB</h3>
-              <span class="help-icon" role="img" aria-label="Ajuda" title="TTFB (1m): tempo médio até o primeiro byte nas verificações HTTP.">?</span>
-            </div>
-            <p>Tempo até o primeiro byte em checagens HTTP; mostra a latência do servidor final.</p>
-          </article>
-        </div>
-      </section>
+            <button id="tracerouteTrigger" class="primary-button" type="button">Rodar novamente</button>
+          </div>
+          <div id="tracerouteTimeline" class="traceroute-timeline" role="list"></div>
+        </section>
+      </main>
+    </div>
 
-      <section class="section-card" aria-label="Tendência das métricas">
-        <div class="section-header">
-          <h2>Tendência (média × p95)</h2>
-          <span class="last-update" id="sparkline-range-label">Últimos ${sparklineMinutes} minutos</span>
-        </div>
-        <div class="sparkline-chart">
-          <svg id="sparkline" viewBox="0 0 600 160" role="img" aria-label="Série histórica do alvo selecionado"></svg>
-          <div id="sparkline-empty">Sem dados suficientes.</div>
-        </div>
-        <div class="sparkline-legend">
-          <span class="legend-item"><span class="legend-dot avg"></span>Média (1m)</span>
-          <span class="legend-item"><span class="legend-dot p95"></span>P95 (1m)</span>
-        </div>
-      </section>
-    </main>
-
-    <script type="module">
-      const UI_CONFIG = ${encodedConfig};
-      const TOOLTIP_EMPTY = "Sem dados no período.";
-
-      const rangeOptions = Array.isArray(UI_CONFIG.rangeOptions) && UI_CONFIG.rangeOptions.length
-        ? [...new Set(UI_CONFIG.rangeOptions.map((value) => Number.parseInt(value, 10)).filter((value) => Number.isFinite(value)))]
-            .sort((a, b) => a - b)
-        : [5, 10, 15];
-      const maxHistoryMinutes = rangeOptions[rangeOptions.length - 1] ?? 15;
-      const historyWindowMs = maxHistoryMinutes * 60 * 1000;
-
-      const state = {
-        target: "",
-        rangeMinutes: rangeOptions.includes(Number(UI_CONFIG.sparklineMinutes))
-          ? Number(UI_CONFIG.sparklineMinutes)
-          : rangeOptions[rangeOptions.length - 1],
-      };
-
-      const targetSelect = document.getElementById("target-select");
-      const rangeSelect = document.getElementById("range-select");
-      const statusBadge = document.getElementById("connection-status");
-      const healthBadge = document.getElementById("health-status");
-      const healthReasonsList = document.getElementById("health-reasons");
-      const healthNoteEl = document.getElementById("health-note");
-      const healthLastUpdateEl = document.getElementById("health-last-update");
-      const healthWindowLabelEl = document.getElementById("health-window-label");
-      const lastUpdateEl = document.getElementById("last-update");
-      const sparklineSvg = document.getElementById("sparkline");
-      const sparklineEmpty = document.getElementById("sparkline-empty");
-      const sparklineRangeLabel = document.getElementById("sparkline-range-label");
-
-      const kpiDefs = {
-        pingP95: {
-          card: document.querySelector('[data-kpi="ping-p95"]'),
-          value: document.querySelector('[data-kpi="ping-p95"] .kpi-value'),
-          tooltip: "${tooltips.pingP95}",
-          thresholdKey: "p95",
-          format: formatMs,
-        },
-        pingAvg: {
-          card: document.querySelector('[data-kpi="ping-avg"]'),
-          value: document.querySelector('[data-kpi="ping-avg"] .kpi-value'),
-          tooltip: "${tooltips.pingAvg}",
-          thresholdKey: null,
-          format: formatMs,
-        },
-        pingLoss: {
-          card: document.querySelector('[data-kpi="ping-loss"]'),
-          value: document.querySelector('[data-kpi="ping-loss"] .kpi-value'),
-          tooltip: "${tooltips.pingLoss}",
-          thresholdKey: "loss",
-          format: formatPct,
-        },
-        pingAvailability: {
-          card: document.querySelector('[data-kpi="ping-availability"]'),
-          value: document.querySelector('[data-kpi="ping-availability"] .kpi-value'),
-          tooltip: "${tooltips.pingAvailability}",
-          thresholdKey: "loss",
-          format: formatPct,
-        },
-        dnsLookup: {
-          card: document.querySelector('[data-kpi="dns-lookup"]'),
-          value: document.querySelector('[data-kpi="dns-lookup"] .kpi-value'),
-          tooltip: "${tooltips.dnsLookup}",
-          thresholdKey: "dns",
-          format: formatMs,
-        },
-        httpTtfb: {
-          card: document.querySelector('[data-kpi="http-ttfb"]'),
-          value: document.querySelector('[data-kpi="http-ttfb"] .kpi-value'),
-          tooltip: "${tooltips.httpTtfb}",
-          thresholdKey: "ttfb",
-          format: formatMs,
-        },
-      };
-
-      const thresholds = UI_CONFIG.thresholds ?? {};
-      const healthSettings = UI_CONFIG.health ?? {};
-      const HEALTH_WINDOW_INFO = {
-        "1m": { key: "win1m", field: "win1m_avg_ms", label: "1 minuto" },
-        "5m": { key: "win5m", field: "win5m_avg_ms", label: "5 minutos" },
-        "1h": { key: "win1h", field: "win1h_avg_ms", label: "1 hora" },
-      };
-      const requestedHealthWindow = typeof healthSettings.window === "string" ? healthSettings.window : "1m";
-      const healthWindowInfo = HEALTH_WINDOW_INFO[requestedHealthWindow] ?? HEALTH_WINDOW_INFO["1m"];
-      const parsedHealthMinPoints = Number.parseInt(healthSettings.requireMinPoints, 10);
-      const healthMinPoints = Number.isFinite(parsedHealthMinPoints) && parsedHealthMinPoints >= 0
-        ? parsedHealthMinPoints
-        : 10;
-      const healthWindowDescription = String(healthSettings.windowLabel ?? healthWindowInfo.label);
-
-      if (healthWindowLabelEl) {
-        healthWindowLabelEl.textContent = healthWindowDescription;
-      }
-
-      const history = new Map();
-      let latestPayload = null;
-      let eventSource = null;
-      let reconnectTimer = null;
-
-      function formatMs(value) {
-        if (!Number.isFinite(value)) {
-          return "—";
-        }
-        if (Math.abs(value) >= 100) {
-          return `${Math.round(value)} ms`;
+    <script>window.UI_CONFIG = ${encodedConfig}; window.UI_STRINGS = ${encodedTooltips};</script>
+  </body>
+</html>`;
 }

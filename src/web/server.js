@@ -1,7 +1,22 @@
 import http from "http";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { runTraceroute } from "../collectors/traceroute.js";
 import { renderIndexPage } from "./index-page.js";
 import { createLiveMetricsBroadcaster } from "./live-metrics.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, "public");
+const fsPromises = fs.promises;
+
+const MIME_TYPES = Object.freeze({
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".svg": "image/svg+xml; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".ico": "image/x-icon",
+});
 
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
@@ -25,6 +40,42 @@ function sendText(res, statusCode, text) {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Content-Length", Buffer.byteLength(body));
   res.end(body);
+}
+
+async function tryServePublicAsset(res, pathname) {
+  if (!pathname.startsWith("/public/")) {
+    return false;
+  }
+
+  const relative = pathname.slice("/public/".length);
+  if (!relative) {
+    return false;
+  }
+
+  const normalized = path.normalize(relative).replace(/^\.\/+/, "");
+  const resolvedPath = path.join(PUBLIC_DIR, normalized);
+  if (!resolvedPath.startsWith(PUBLIC_DIR)) {
+    return false;
+  }
+
+  try {
+    const data = await fsPromises.readFile(resolvedPath);
+    const ext = path.extname(resolvedPath).toLowerCase();
+    const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
+    res.statusCode = 200;
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.setHeader("Content-Length", data.length);
+    res.end(data);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    console.error("[web] Failed to serve asset:", error);
+    sendText(res, 500, "Failed to load asset");
+    return true;
+  }
 }
 
 function readJsonBody(req, maxBytes = 256 * 1024) {
@@ -227,6 +278,9 @@ function createRequestHandler(db, appConfig, options = {}) {
         tracerouteById: db.prepare(
           "SELECT id, ts, target, hops_json, success FROM traceroute_run WHERE id = ?"
         ),
+        tracerouteLatestByTarget: db.prepare(
+          "SELECT id, ts, target, hops_json, success FROM traceroute_run WHERE target = ? ORDER BY ts DESC LIMIT 1"
+        ),
       }
     : null;
 
@@ -258,6 +312,10 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
+    if (await tryServePublicAsset(res, parsedUrl.pathname)) {
+      return;
+    }
+
     if (method === "GET" && parsedUrl.pathname === "/health") {
       try {
         if (db) {
@@ -275,7 +333,7 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/live/metrics") {
+    if (method === "GET" && (parsedUrl.pathname === "/live/metrics" || parsedUrl.pathname === "/v1/live/metrics")) {
       if (!liveMetrics) {
         sendJson(res, 503, { error: "Live metrics unavailable" });
         return;
@@ -320,7 +378,10 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/api/ping/window") {
+    if (
+      method === "GET" &&
+      (parsedUrl.pathname === "/api/ping/window" || parsedUrl.pathname === "/v1/api/ping/window")
+    ) {
       if (!statements) {
         sendJson(res, 500, { error: "Database unavailable" });
         return;
@@ -351,7 +412,10 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/api/dns") {
+    if (
+      method === "GET" &&
+      (parsedUrl.pathname === "/api/dns" || parsedUrl.pathname === "/v1/api/dns")
+    ) {
       if (!statements) {
         sendJson(res, 500, { error: "Database unavailable" });
         return;
@@ -379,7 +443,10 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/api/http") {
+    if (
+      method === "GET" &&
+      (parsedUrl.pathname === "/api/http" || parsedUrl.pathname === "/v1/api/http")
+    ) {
       if (!statements) {
         sendJson(res, 500, { error: "Database unavailable" });
         return;
@@ -409,8 +476,51 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
+    if (method === "GET" && (parsedUrl.pathname === "/api/traceroute/latest" || parsedUrl.pathname === "/v1/api/traceroute/latest")) {
+      if (!statements) {
+        sendJson(res, 500, { error: "Database unavailable" });
+        return;
+      }
+
+      const rawTarget = parsedUrl.searchParams.get("target");
+      const target = typeof rawTarget === "string" ? rawTarget.trim() : "";
+      if (!target) {
+        sendJson(res, 400, { error: "Target required" });
+        return;
+      }
+
+      try {
+        const row = statements.tracerouteLatestByTarget.get(target);
+        if (!row) {
+          sendJson(res, 404, { error: "Traceroute not found" });
+          return;
+        }
+
+        let hops = [];
+        try {
+          const parsed = JSON.parse(row.hops_json ?? "[]");
+          if (Array.isArray(parsed)) {
+            hops = parsed;
+          }
+        } catch (error) {
+          hops = [];
+        }
+
+        sendJson(res, 200, {
+          id: row.id,
+          ts: row.ts,
+          target: row.target,
+          success: row.success,
+          hops,
+        });
+      } catch (error) {
+        sendJson(res, 500, { error: error?.message ?? "Query failed" });
+      }
+      return;
+    }
+
     if (method === "GET") {
-      const tracerouteMatch = /^\/api\/traceroute\/(\d+)$/.exec(parsedUrl.pathname);
+      const tracerouteMatch = /^\/(?:v1\/)?api\/traceroute\/(\d+)$/.exec(parsedUrl.pathname);
       if (tracerouteMatch) {
         if (!statements) {
           sendJson(res, 500, { error: "Database unavailable" });

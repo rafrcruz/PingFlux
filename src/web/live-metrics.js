@@ -112,6 +112,7 @@ function computePingWindowMetrics({
   const result = {
     avg_ms: null,
     p95_ms: null,
+    p50_ms: null,
     loss_pct: null,
     samples: 0,
   };
@@ -121,6 +122,7 @@ function computePingWindowMetrics({
     .map((entry) => entry.rtt)
     .filter((value) => Number.isFinite(value));
   result.p95_ms = computePercentile(latencies, 0.95);
+  result.p50_ms = computePercentile(latencies, 0.5);
 
   if (useWindows && aggregateEntries.length > 0) {
     const relevant = computePingWindowsFromAggregates(aggregateEntries, cutoff, true);
@@ -132,6 +134,7 @@ function computePingWindowMetrics({
       let received = 0;
       let latencySum = 0;
       let latencyCount = 0;
+      let percentileValues = [];
 
       for (const entry of relevant) {
         const sentCount = Number(entry.sent);
@@ -147,11 +150,29 @@ function computePingWindowMetrics({
           latencySum += avgValue * receivedCount;
           latencyCount += receivedCount;
         }
+        const p50Value = normalizeNumber(entry.p50_ms);
+        if (p50Value !== null) {
+          percentileValues.push({ value: p50Value, weight: Number.isFinite(receivedCount) ? receivedCount : 1 });
+        }
       }
 
       result.samples = sent;
       if (latencyCount > 0) {
         result.avg_ms = latencySum / latencyCount;
+      }
+      if (percentileValues.length > 0) {
+        const weighted = percentileValues.reduce(
+          (acc, entry) => {
+            const weight = Number(entry.weight) > 0 ? Number(entry.weight) : 1;
+            acc.total += entry.value * weight;
+            acc.weight += weight;
+            return acc;
+          },
+          { total: 0, weight: 0 }
+        );
+        if (weighted.weight > 0) {
+          result.p50_ms = weighted.total / weighted.weight;
+        }
       }
       if (sent > 0) {
         const effectiveReceived = Number.isFinite(received) ? received : 0;
@@ -173,6 +194,9 @@ function computePingWindowMetrics({
   if (samples === 0) {
     result.loss_pct = null;
     result.avg_ms = null;
+    if (!Number.isFinite(result.p50_ms ?? NaN)) {
+      result.p50_ms = null;
+    }
     return result;
   }
 
@@ -183,12 +207,22 @@ function computePingWindowMetrics({
       .map((entry) => entry.rtt);
     result.avg_ms = average(successLatencies);
   }
+  const percentileSource = relevantRaw
+    .filter((entry) => entry.success && Number.isFinite(entry.rtt))
+    .map((entry) => entry.rtt);
+  const median = computePercentile(percentileSource, 0.5);
+  if (Number.isFinite(median ?? NaN)) {
+    result.p50_ms = median;
+  }
   result.loss_pct = ((samples - successCount) / samples) * 100;
   if (!Number.isFinite(result.loss_pct)) {
     result.loss_pct = null;
   }
   if (!Number.isFinite(result.avg_ms ?? NaN)) {
     result.avg_ms = null;
+  }
+  if (!Number.isFinite(result.p50_ms ?? NaN)) {
+    result.p50_ms = null;
   }
 
   return result;
