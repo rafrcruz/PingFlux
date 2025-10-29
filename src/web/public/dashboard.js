@@ -1,6 +1,12 @@
 const CONFIG = window.UI_CONFIG ?? {};
 const STRINGS = window.UI_STRINGS ?? {};
 
+const SPARKLINE_EWMA_ALPHA = (() => {
+  const raw = CONFIG.UI_EWMA_ALPHA ?? CONFIG.uiEwmaAlpha;
+  const num = Number(raw);
+  return Number.isFinite(num) && num > 0 && num < 1 ? num : null;
+})();
+
 function toPositiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -77,6 +83,7 @@ const state = {
   tracerouteExpanded: false,
   lossHasData: false,
   lossUserToggled: false,
+  targetIndicators: new Map(),
 };
 
 const refs = {
@@ -85,6 +92,8 @@ const refs = {
   connectionText: document.getElementById("connectionText"),
   lastUpdate: document.getElementById("lastUpdate"),
   targetSelect: document.getElementById("targetSelect"),
+  targetMode: document.getElementById("pingModeIndicator"),
+  staleBadge: document.getElementById("staleBadge"),
   rangeButtons: document.getElementById("rangeButtons"),
   pauseButton: document.getElementById("pauseStream"),
   lossToggle: document.getElementById("lossToggle"),
@@ -243,6 +252,7 @@ function mountControls() {
       fetchPingHistory(value).catch(() => {});
       fetchTraceroute(value).catch(() => {});
       scheduleRender();
+      updateTargetStatusDisplay();
     }
   });
 
@@ -708,10 +718,18 @@ function handleLivePayload(payload) {
     updateTargets(pingTargets);
   }
 
+  if (payload.ping) {
+    Object.entries(payload.ping).forEach(([target, metrics]) => {
+      updateTargetIndicators(target, metrics);
+    });
+  }
+
   if (state.selectedTarget && payload.ping?.[state.selectedTarget]) {
     ingestPingMetrics(state.selectedTarget, payload.ping[state.selectedTarget], state.lastUpdateTs);
     heatmapNeedsRefresh = true;
   }
+
+  updateTargetStatusDisplay();
 
   ingestDnsMetrics(payload.dns, state.lastUpdateTs);
   ingestHttpMetrics(payload.http, state.lastUpdateTs);
@@ -747,9 +765,60 @@ function updateTargets(targetList) {
     });
     refs.targetSelect.disabled = sorted.length === 0;
   }
+  updateTargetStatusDisplay();
+}
+
+function updateTargetIndicators(target, metrics) {
+  if (!target) {
+    return;
+  }
+  const ageValue = Number(metrics?.age_ms);
+  const ageMs = Number.isFinite(ageValue) && ageValue >= 0 ? ageValue : null;
+  const fresh = metrics?.fresh === undefined ? null : Boolean(metrics.fresh);
+  const modeRaw = typeof metrics?.pingMode === "string" ? metrics.pingMode.trim() : "";
+  const pingMode = modeRaw ? modeRaw.toUpperCase() : null;
+
+  state.targetIndicators.set(target, {
+    fresh,
+    ageMs,
+    pingMode,
+  });
+}
+
+function updateTargetStatusDisplay() {
+  const target = state.selectedTarget;
+  const meta = target ? state.targetIndicators.get(target) : null;
+
+  if (refs.targetMode) {
+    if (meta?.pingMode) {
+      refs.targetMode.hidden = false;
+      refs.targetMode.textContent = meta.pingMode;
+      refs.targetMode.setAttribute("title", "Modo de medição atual");
+      refs.targetMode.setAttribute("aria-label", `Modo de medição atual: ${meta.pingMode}`);
+    } else {
+      refs.targetMode.hidden = true;
+      refs.targetMode.removeAttribute("title");
+      refs.targetMode.removeAttribute("aria-label");
+    }
+  }
+
+  if (refs.staleBadge) {
+    if (meta && meta.fresh === false && meta.ageMs != null) {
+      const seconds = Math.max(1, Math.floor(meta.ageMs / 1000));
+      refs.staleBadge.hidden = false;
+      refs.staleBadge.textContent = "Desatualizado";
+      refs.staleBadge.setAttribute("title", `Sem novas amostras há ${seconds}s.`);
+      refs.staleBadge.setAttribute("aria-label", `Sem novas amostras há ${seconds} segundos`);
+    } else {
+      refs.staleBadge.hidden = true;
+      refs.staleBadge.removeAttribute("title");
+      refs.staleBadge.removeAttribute("aria-label");
+    }
+  }
 }
 
 function ingestPingMetrics(target, metrics, ts) {
+  updateTargetIndicators(target, metrics);
   const entry = {
     ts,
     p50: normalize(metrics?.win1m?.p50_ms),
@@ -770,6 +839,7 @@ function ingestPingMetrics(target, metrics, ts) {
   pruneSeries(series, HISTORY_LIMIT_MS);
   updateKpis(metrics, entry);
   updateEventsFromPing(entry);
+  updateTargetStatusDisplay();
 }
 
 function ingestDnsMetrics(dns, ts) {
@@ -1350,14 +1420,30 @@ function renderSparkline(chart, list) {
   if (!chart) {
     return;
   }
-  const data = list
-    .filter((item) => Number.isFinite(item.value))
-    .map((item) => [item.ts, item.value]);
+  const raw = list.map((item) => [item.ts, Number.isFinite(item.value) ? item.value : null]);
+  const numericCount = raw.reduce((count, [, value]) => (Number.isFinite(value) ? count + 1 : count), 0);
+  const data = SPARKLINE_EWMA_ALPHA != null
+    ? applySparklineSmoothing(raw, SPARKLINE_EWMA_ALPHA)
+    : raw;
   const id = chart.getDom()?.id;
   if (id) {
-    setChartEmptyState(id, data.length === 0);
+    setChartEmptyState(id, numericCount === 0);
   }
   chart.setOption({ series: [{ data }] });
+}
+
+function applySparklineSmoothing(points, alpha) {
+  if (!Number.isFinite(alpha) || alpha <= 0 || alpha >= 1) {
+    return points;
+  }
+  let previous = null;
+  return points.map(([ts, value]) => {
+    if (Number.isFinite(value)) {
+      previous = previous == null ? value : alpha * value + (1 - alpha) * previous;
+      return [ts, previous];
+    }
+    return [ts, null];
+  });
 }
 
 function updateConnectionStatus() {

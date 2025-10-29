@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import { getRuntimeStateSnapshot as getPingRuntimeState } from "../collectors/ping.js";
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -236,6 +237,8 @@ function computePingMetrics({
   recentStmt,
   successStmt,
   windowStmt,
+  runtimeState,
+  staleThresholdMs,
 }) {
   const since = now - HOUR_MS;
   const rawRows = recentStmt ? recentStmt.all(since) : [];
@@ -253,6 +256,9 @@ function computePingMetrics({
   });
 
   const payload = {};
+  const staleLimit = Number.isFinite(staleThresholdMs) ? Math.max(0, staleThresholdMs) : 10000;
+  const runtimeStateMap = runtimeState && typeof runtimeState === "object" ? runtimeState : {};
+
   for (const target of targets) {
     const lastRow = lastSampleStmt ? lastSampleStmt.get(target) : null;
     const lastSample = {
@@ -292,10 +298,41 @@ function computePingMetrics({
       });
     }
 
-    payload[target] = {
+    const runtimeInfo = runtimeStateMap[target] ?? null;
+    const runtimeLastTs = Number.isFinite(runtimeInfo?.lastSampleTs)
+      ? Number(runtimeInfo.lastSampleTs)
+      : null;
+    const sampleTs = Number.isFinite(lastSample.ts) ? Number(lastSample.ts) : null;
+    const latestTs = [runtimeLastTs, sampleTs].filter((value) => Number.isFinite(value));
+    const resolvedTs = latestTs.length > 0 ? Math.max(...latestTs) : null;
+    const ageMs = resolvedTs != null ? Math.max(0, now - resolvedTs) : null;
+    // Freshness flag used by the UI to highlight stale data.
+    const fresh = ageMs == null ? false : ageMs <= staleLimit;
+    const pingMode = typeof runtimeInfo?.mode === "string" && runtimeInfo.mode ? runtimeInfo.mode : null;
+    const runtimeCounters = runtimeInfo
+      ? {
+          consecutiveFailures: Number.isFinite(runtimeInfo.consecutiveFailures)
+            ? Number(runtimeInfo.consecutiveFailures)
+            : 0,
+          consecutiveSuccesses: Number.isFinite(runtimeInfo.consecutiveSuccesses)
+            ? Number(runtimeInfo.consecutiveSuccesses)
+            : 0,
+        }
+      : null;
+
+    const entry = {
       lastSample,
       ...windowsPayload,
+      fresh,
+      age_ms: ageMs,
+      pingMode,
     };
+
+    if (runtimeCounters) {
+      entry.state = runtimeCounters;
+    }
+
+    payload[target] = entry;
   }
 
   return payload;
@@ -380,8 +417,12 @@ class LiveMetricsBroadcaster extends EventEmitter {
     this.intervalMs = Number.isFinite(interval) && interval > 0 ? interval : 2000;
     this.useWindows = Boolean(this.config.useWindows);
     this.pingTargets = Array.isArray(this.config.pingTargets) ? this.config.pingTargets : [];
+    this.staleThresholdMs = Number.isFinite(this.config.staleMs) && this.config.staleMs >= 0
+      ? Number(this.config.staleMs)
+      : 10000;
     this.clients = new Set();
     this.timer = null;
+    this.runtimeStateProvider = getPingRuntimeState;
 
     this.statements = this.prepareStatements();
   }
@@ -529,6 +570,7 @@ class LiveMetricsBroadcaster extends EventEmitter {
 
   buildPayload() {
     const now = Date.now();
+    const runtimeState = this.runtimeStateProvider ? this.runtimeStateProvider() : {};
     const ping = computePingMetrics({
       now,
       configTargets: this.pingTargets,
@@ -537,6 +579,8 @@ class LiveMetricsBroadcaster extends EventEmitter {
       recentStmt: this.statements.pingRecent,
       successStmt: this.statements.pingSuccessRecent,
       windowStmt: this.statements.pingWindowRecent,
+      runtimeState,
+      staleThresholdMs: this.staleThresholdMs,
     });
 
     const dnsRows = this.statements.dnsRecent ? this.statements.dnsRecent.all(now - HOUR_MS) : [];

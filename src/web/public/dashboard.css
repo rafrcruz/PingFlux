@@ -268,6 +268,41 @@ body {
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 
+.target-status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.target-status-row select {
+  flex: 1 1 auto;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.badge-mode {
+  background: rgba(56, 189, 248, 0.18);
+  color: var(--accent-strong);
+  text-transform: uppercase;
+}
+
+.badge-stale {
+  background: rgba(248, 113, 113, 0.18);
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
 .select-control select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;

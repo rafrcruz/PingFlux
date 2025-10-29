@@ -15,6 +15,9 @@ const DEFAULTS = Object.freeze({
   PING_INTERVAL_S: "60",
   PING_TIMEOUT_MS: "3000",
   PING_METHOD: "auto",
+  PING_TCP_PORT: "443",
+  PING_FALLBACK_AFTER_FAILS: "3",
+  PING_RECOVERY_AFTER_OKS: "2",
   DNS_HOSTNAMES: "google.com",
   DNS_INTERVAL_S: "60",
   DNS_TIMEOUT_MS: "3000",
@@ -26,6 +29,11 @@ const DEFAULTS = Object.freeze({
   ALERT_MIN_POINTS: "10",
   LIVE_PUSH_INTERVAL_MS: "2000",
   LIVE_USE_WINDOWS: "true",
+  LIVE_STALE_MS: "10000",
+  AGG_INTERVAL_MS: "60000",
+  AGG_CATCHUP_MIN: "10",
+  AGG_MAX_BATCH: "5000",
+  UI_EWMA_ALPHA: "",
 });
 
 const QUOTE_TRIM_PATTERN = /^['"]?(.*?)['"]?$/;
@@ -99,6 +107,17 @@ function toNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function toClampedAlpha(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  if (parsed <= 0 || parsed >= 1) {
+    return fallback;
+  }
+  return parsed;
+}
+
 function toBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") {
     return fallback;
@@ -169,6 +188,18 @@ export function getConfig() {
       fileVariables.PING_METHOD_PREFERENCE ??
       DEFAULTS.PING_METHOD
   );
+  const pingTcpPort = toPositiveInteger(
+    resolveVar("PING_TCP_PORT", fileVariables),
+    Number(DEFAULTS.PING_TCP_PORT)
+  );
+  const pingFallbackAfterFails = toPositiveInteger(
+    resolveVar("PING_FALLBACK_AFTER_FAILS", fileVariables),
+    Number(DEFAULTS.PING_FALLBACK_AFTER_FAILS)
+  );
+  const pingRecoveryAfterOks = toPositiveInteger(
+    resolveVar("PING_RECOVERY_AFTER_OKS", fileVariables),
+    Number(DEFAULTS.PING_RECOVERY_AFTER_OKS)
+  );
 
   const dnsHostnames = toStringList(
     resolveVar("DNS_HOSTNAMES", fileVariables),
@@ -197,6 +228,23 @@ export function getConfig() {
   const liveUseWindows = toBoolean(
     resolveVar("LIVE_USE_WINDOWS", fileVariables),
     toBoolean(DEFAULTS.LIVE_USE_WINDOWS, true)
+  );
+  const liveStaleMs = toPositiveInteger(
+    resolveVar("LIVE_STALE_MS", fileVariables),
+    Number(DEFAULTS.LIVE_STALE_MS)
+  );
+
+  const aggIntervalMs = toPositiveInteger(
+    resolveVar("AGG_INTERVAL_MS", fileVariables),
+    Number(DEFAULTS.AGG_INTERVAL_MS)
+  );
+  const aggCatchupMin = toPositiveInteger(
+    resolveVar("AGG_CATCHUP_MIN", fileVariables),
+    Number(DEFAULTS.AGG_CATCHUP_MIN)
+  );
+  const aggMaxBatch = toPositiveInteger(
+    resolveVar("AGG_MAX_BATCH", fileVariables),
+    Number(DEFAULTS.AGG_MAX_BATCH)
   );
 
   const alertP95Ms = toNumber(
@@ -228,6 +276,9 @@ export function getConfig() {
       intervalMs: pingIntervalMs,
       timeoutMs: pingTimeoutMs,
       methodPreference: pingMethod,
+      tcpPort: pingTcpPort,
+      fallbackAfterFails: pingFallbackAfterFails,
+      recoveryAfterOks: pingRecoveryAfterOks,
     },
     dns: {
       hostnames: dnsHostnames,
@@ -242,6 +293,18 @@ export function getConfig() {
     liveMetrics: {
       pushIntervalMs: livePushIntervalMs,
       useWindows: liveUseWindows,
+      staleMs: liveStaleMs,
+    },
+    aggregation: {
+      intervalMs: aggIntervalMs,
+      catchupMinutes: aggCatchupMin,
+      maxBatch: aggMaxBatch,
+    },
+    ui: {
+      ewmaAlpha: toClampedAlpha(
+        resolveVar("UI_EWMA_ALPHA", fileVariables) ?? DEFAULTS.UI_EWMA_ALPHA,
+        null
+      ),
     },
     alerts: {
       p95Ms: alertP95Ms,

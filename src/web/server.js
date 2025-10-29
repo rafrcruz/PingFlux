@@ -202,6 +202,11 @@ function parseMinPoints(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 10;
 }
 
+function parseAlpha(value) {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 && num < 1 ? num : null;
+}
+
 function describeWindowLabel(window) {
   switch (window) {
     case "1m":
@@ -222,6 +227,11 @@ const UI_EVENTS_COOLDOWN_MS = parsePositiveInt(
   process.env.UI_EVENTS_COOLDOWN_MS ?? process.env.EVENTS_COOLDOWN_MS,
   10000
 );
+const UI_EWMA_ALPHA = (() => {
+  const value = process.env.UI_EWMA_ALPHA;
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 && num < 1 ? num : null;
+})();
 const THRESH_P95_WARN_MS = parseFiniteNumber(process.env.THRESH_P95_WARN_MS);
 const THRESH_P95_CRIT_MS = parseFiniteNumber(process.env.THRESH_P95_CRIT_MS);
 const THRESH_LOSS_WARN_PCT = parseFiniteNumber(process.env.THRESH_LOSS_WARN_PCT);
@@ -268,6 +278,7 @@ function getUiConfig(providedConfig) {
     base.tracerouteMaxAgeMin ?? base.TRACEROUTE_MAX_AGE_MIN,
     UI_TRACEROUTE_MAX_AGE_MIN
   );
+  const ewmaAlpha = parseAlpha(base.uiEwmaAlpha ?? base.UI_EWMA_ALPHA ?? UI_EWMA_ALPHA);
 
   return {
     defaultTarget,
@@ -281,6 +292,8 @@ function getUiConfig(providedConfig) {
     sparklineMinutes: parseSparklineMinutes(base.sparklineMinutes ?? UI_SPARKLINE_MINUTES),
     sseRetryMs: parseRetryInterval(base.sseRetryMs ?? UI_SSE_RETRY_MS),
     rangeOptions: Array.from(SPARKLINE_RANGE_OPTIONS),
+    uiEwmaAlpha: ewmaAlpha,
+    UI_EWMA_ALPHA: ewmaAlpha,
     thresholds: {
       p95: buildThresholdPair(thresholds.p95?.warn ?? THRESH_P95_WARN_MS, thresholds.p95?.crit ?? THRESH_P95_CRIT_MS),
       loss: buildThresholdPair(thresholds.loss?.warn ?? THRESH_LOSS_WARN_PCT, thresholds.loss?.crit ?? THRESH_LOSS_CRIT_PCT),
@@ -343,6 +356,7 @@ function createRequestHandler(db, appConfig, options = {}) {
           pushIntervalMs: options?.live?.pushIntervalMs,
           useWindows: options?.live?.useWindows,
           pingTargets: options?.live?.pingTargets,
+          staleMs: options?.live?.staleMs,
         },
       })
     : null;
@@ -665,6 +679,7 @@ export async function startServer({
     eventsDedupMs: UI_EVENTS_DEDUP_MS,
     eventsCooldownMs: UI_EVENTS_COOLDOWN_MS,
     tracerouteMaxAgeMin: UI_TRACEROUTE_MAX_AGE_MIN,
+    uiEwmaAlpha: config?.ui?.ewmaAlpha,
     thresholds: {
       p95: { warn: THRESH_P95_WARN_MS, crit: THRESH_P95_CRIT_MS },
       loss: { warn: THRESH_LOSS_WARN_PCT, crit: THRESH_LOSS_CRIT_PCT },
@@ -678,6 +693,7 @@ export async function startServer({
       pushIntervalMs: config?.liveMetrics?.pushIntervalMs,
       useWindows: config?.liveMetrics?.useWindows,
       pingTargets: config?.ping?.targets,
+      staleMs: config?.liveMetrics?.staleMs,
     },
   });
 
