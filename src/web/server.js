@@ -100,16 +100,69 @@ const RANGE_TO_DURATION_MS = {
 };
 
 const RANGE_OPTIONS = Object.freeze(Object.keys(RANGE_TO_DURATION_MS));
-const RAW_UI_DEFAULT_RANGE = String(process.env.UI_DEFAULT_RANGE ?? "").trim().toLowerCase();
-const UI_DEFAULT_RANGE = RANGE_OPTIONS.includes(RAW_UI_DEFAULT_RANGE) ? RAW_UI_DEFAULT_RANGE : "1h";
 const UI_DEFAULT_TARGET = String(process.env.UI_DEFAULT_TARGET ?? "").trim();
+const SPARKLINE_RANGE_OPTIONS = Object.freeze([5, 10, 15]);
+
+function parseFiniteNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function parseSparklineMinutes(value) {
+  const parsed = Number.parseInt(value, 10);
+  return SPARKLINE_RANGE_OPTIONS.includes(parsed) ? parsed : 15;
+}
+
+function parseRetryInterval(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3000;
+}
+
+const UI_SPARKLINE_MINUTES = parseSparklineMinutes(process.env.UI_SPARKLINE_MINUTES);
+const UI_SSE_RETRY_MS = parseRetryInterval(process.env.UI_SSE_RETRY_MS);
+const THRESH_P95_WARN_MS = parseFiniteNumber(process.env.THRESH_P95_WARN_MS);
+const THRESH_P95_CRIT_MS = parseFiniteNumber(process.env.THRESH_P95_CRIT_MS);
+const THRESH_LOSS_WARN_PCT = parseFiniteNumber(process.env.THRESH_LOSS_WARN_PCT);
+const THRESH_LOSS_CRIT_PCT = parseFiniteNumber(process.env.THRESH_LOSS_CRIT_PCT);
+const THRESH_TTFB_WARN_MS = parseFiniteNumber(process.env.THRESH_TTFB_WARN_MS);
+const THRESH_TTFB_CRIT_MS = parseFiniteNumber(process.env.THRESH_TTFB_CRIT_MS);
+const THRESH_DNS_WARN_MS = parseFiniteNumber(process.env.THRESH_DNS_WARN_MS);
+const THRESH_DNS_CRIT_MS = parseFiniteNumber(process.env.THRESH_DNS_CRIT_MS);
+
+function buildThresholdPair(warn, crit) {
+  return {
+    warn: parseFiniteNumber(warn),
+    crit: parseFiniteNumber(crit),
+  };
+}
+
+function getUiConfig(providedConfig) {
+  const base = providedConfig && typeof providedConfig === "object" ? providedConfig : {};
+  const thresholds = base.thresholds && typeof base.thresholds === "object" ? base.thresholds : {};
+
+  return {
+    defaultTarget: typeof base.defaultTarget === "string" ? base.defaultTarget : UI_DEFAULT_TARGET,
+    sparklineMinutes: parseSparklineMinutes(base.sparklineMinutes ?? UI_SPARKLINE_MINUTES),
+    sseRetryMs: parseRetryInterval(base.sseRetryMs ?? UI_SSE_RETRY_MS),
+    rangeOptions: Array.from(SPARKLINE_RANGE_OPTIONS),
+    thresholds: {
+      p95: buildThresholdPair(thresholds.p95?.warn ?? THRESH_P95_WARN_MS, thresholds.p95?.crit ?? THRESH_P95_CRIT_MS),
+      loss: buildThresholdPair(thresholds.loss?.warn ?? THRESH_LOSS_WARN_PCT, thresholds.loss?.crit ?? THRESH_LOSS_CRIT_PCT),
+      dns: buildThresholdPair(thresholds.dns?.warn ?? THRESH_DNS_WARN_MS, thresholds.dns?.crit ?? THRESH_DNS_CRIT_MS),
+      ttfb: buildThresholdPair(thresholds.ttfb?.warn ?? THRESH_TTFB_WARN_MS, thresholds.ttfb?.crit ?? THRESH_TTFB_CRIT_MS),
+    },
+  };
+}
 
 function renderIndexHtml(providedConfig) {
-  const appConfig = {
-    defaultTarget: providedConfig?.defaultTarget ?? UI_DEFAULT_TARGET,
-    defaultRange: providedConfig?.defaultRange ?? UI_DEFAULT_RANGE,
-    ranges: RANGE_OPTIONS,
-    alerts: providedConfig?.alerts ?? null,
+  const uiConfig = getUiConfig(providedConfig);
+  const tooltipTexts = {
+    pingP95: "p95: 95% das amostras tiveram RTT menor ou igual a este valor; bom para ver picos.",
+    pingAvg: "RTT médio: tempo médio de resposta no último minuto.",
+    pingLoss: "Perda: % de pacotes que não retornaram no período.",
+    pingAvailability: "Disponibilidade: estimativa de 100 - perda; quanto maior, melhor.",
+    dnsLookup: "DNS lookup (1m): tempo médio de resolução DNS no último minuto.",
+    httpTtfb: "TTFB (1m): tempo médio até o primeiro byte nas verificações HTTP.",
   };
 
   return `<!DOCTYPE html>
@@ -117,854 +170,773 @@ function renderIndexHtml(providedConfig) {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PingFlux</title>
+    <title>PingFlux · Live</title>
     <style>
       :root {
-        color-scheme: dark light;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        line-height: 1.4;
+        color-scheme: dark;
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.45;
+        background-color: #0b1120;
       }
 
       body {
         margin: 0;
         padding: 0;
-        background: #0d1017;
-        color: #f3f5f9;
+        background: radial-gradient(circle at top, rgba(56, 189, 248, 0.08), transparent 55%), #0b1120;
+        color: #e2e8f0;
       }
 
       main {
-        max-width: 960px;
+        max-width: 1180px;
         margin: 0 auto;
-        padding: 24px 16px 48px;
+        padding: 32px 20px 64px;
+        display: flex;
+        flex-direction: column;
+        gap: 24px;
       }
 
       header {
         display: flex;
-        flex-direction: column;
-        gap: 8px;
-        margin-bottom: 24px;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: flex-end;
       }
 
       h1 {
         margin: 0;
-        font-size: 2rem;
+        font-size: clamp(2rem, 3vw, 2.6rem);
+        font-weight: 600;
+        letter-spacing: -0.02em;
       }
 
-      form {
+      .subtitle {
+        margin: 4px 0 0;
+        color: rgba(148, 163, 184, 0.9);
+        font-size: 0.95rem;
+      }
+
+      .status-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        align-items: flex-end;
+        min-width: 200px;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 0.82rem;
+        font-weight: 500;
+        border: 1px solid rgba(34, 197, 94, 0.4);
+        background: rgba(34, 197, 94, 0.12);
+        color: #34d399;
+        transition: all 0.2s ease;
+      }
+
+      .status.connecting {
+        border-color: rgba(59, 130, 246, 0.4);
+        background: rgba(59, 130, 246, 0.12);
+        color: #60a5fa;
+      }
+
+      .status.reconnecting {
+        border-color: rgba(250, 204, 21, 0.5);
+        background: rgba(250, 204, 21, 0.12);
+        color: #facc15;
+      }
+
+      .last-update {
+        font-size: 0.85rem;
+        color: #94a3b8;
+      }
+
+      .controls {
         display: flex;
         flex-wrap: wrap;
-        gap: 12px;
+        gap: 16px;
         align-items: flex-end;
       }
 
       label {
         display: flex;
         flex-direction: column;
-        gap: 4px;
-        font-size: 0.9rem;
+        gap: 6px;
+        font-size: 0.85rem;
+        color: #94a3b8;
       }
 
-      input[type="text"],
       select {
-        padding: 6px 10px;
-        border-radius: 4px;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        background: rgba(17, 22, 31, 0.7);
-        color: inherit;
-        min-width: 140px;
-      }
-
-      button {
-        padding: 8px 16px;
-        border-radius: 4px;
-        border: none;
-        background: #2563eb;
-        color: white;
-        cursor: pointer;
-        font-size: 0.95rem;
-      }
-
-      button:disabled {
-        opacity: 0.6;
-        cursor: wait;
-      }
-
-      .card {
-        background: rgba(15, 18, 27, 0.85);
-        border: 1px solid rgba(255, 255, 255, 0.08);
+        appearance: none;
+        padding: 8px 12px;
         border-radius: 8px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        background: rgba(15, 23, 42, 0.9);
+        color: inherit;
+        font-size: 0.95rem;
+        min-width: 170px;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      }
+
+      select:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 16px;
+      }
+
+      .kpi-card {
+        background: rgba(15, 23, 42, 0.82);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 14px;
         padding: 16px;
-        margin-top: 24px;
+        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
+        transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
       }
 
-      .chart-container {
-        width: 100%;
-        height: 320px;
+      .kpi-card.warn {
+        border-color: rgba(250, 204, 21, 0.9);
+        background: rgba(250, 204, 21, 0.08);
+      }
+
+      .kpi-card.crit {
+        border-color: rgba(239, 68, 68, 0.95);
+        background: rgba(239, 68, 68, 0.1);
+      }
+
+      .kpi-label {
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: rgba(148, 163, 184, 0.85);
+      }
+
+      .kpi-value {
+        margin-top: 10px;
+        font-size: clamp(1.7rem, 3vw, 2.3rem);
+        font-weight: 600;
+        color: #f8fafc;
+      }
+
+      .section-card {
+        background: rgba(15, 23, 42, 0.82);
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 16px;
+        padding: 20px;
+        box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
+      }
+
+      .section-header {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      .section-header h2 {
+        margin: 0;
+        font-size: 1.2rem;
+        font-weight: 600;
+      }
+
+      .sparkline-chart {
         position: relative;
+        width: 100%;
+        height: 160px;
       }
 
-      svg {
+      #sparkline {
         width: 100%;
         height: 100%;
         display: block;
       }
 
-      .message {
-        margin-top: 12px;
-        font-size: 0.95rem;
-        color: #facc15;
-      }
-
-      .alert {
-        margin-top: 16px;
-        padding: 12px 16px;
-        border-radius: 6px;
-        border: 1px solid rgba(250, 204, 21, 0.4);
-        background: rgba(253, 224, 71, 0.1);
-        color: #facc15;
+      #sparkline-empty {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #94a3b8;
         font-size: 0.95rem;
       }
 
-      .summary-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        gap: 12px;
+      .sparkline-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        font-size: 0.78rem;
+        color: #94a3b8;
         margin-top: 12px;
       }
 
-      .summary-item {
-        background: rgba(255, 255, 255, 0.04);
-        border-radius: 6px;
-        padding: 12px;
+      .legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
       }
 
-      .summary-label {
-        font-size: 0.8rem;
-        color: rgba(243, 245, 249, 0.7);
+      .legend-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        display: inline-block;
       }
 
-      .summary-value {
-        font-size: 1.2rem;
-        font-weight: 600;
+      .legend-dot.avg {
+        background: #38bdf8;
       }
 
-      .table-container {
-        overflow-x: auto;
-        margin-top: 12px;
+      .legend-dot.p95 {
+        background: #34d399;
       }
 
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
+      @media (max-width: 640px) {
+        .status-panel {
+          align-items: flex-start;
+        }
 
-      th,
-      td {
-        padding: 6px 8px;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-        font-size: 0.85rem;
-        text-align: left;
-      }
+        .kpi-grid {
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        }
 
-      th {
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        font-size: 0.75rem;
-        color: rgba(243, 245, 249, 0.7);
+        .kpi-value {
+          font-size: 1.8rem;
+        }
       }
     </style>
   </head>
   <body>
     <main>
       <header>
-        <h1>PingFlux</h1>
-        <p>Monitoramento simples de RTT por alvo.</p>
+        <div>
+          <h1>PingFlux</h1>
+          <p class="subtitle">Dashboard de latência em tempo real.</p>
+        </div>
+        <div class="status-panel">
+          <span id="connection-status" class="status connecting">Conectando…</span>
+          <span class="last-update">Última atualização: <strong id="last-update">—</strong></span>
+        </div>
       </header>
-      <form id="controls" autocomplete="off">
+
+      <section class="controls" aria-label="Controles do dashboard">
         <label>
           Target
-          <input type="text" name="target" id="target" list="target-options" placeholder="ex: 8.8.8.8" />
-          <datalist id="target-options"></datalist>
-        </label>
-        <label>
-          Range
-          <select name="range" id="range">
-            ${RANGE_OPTIONS.map((range) => `<option value="${range}">${range}</option>`).join("")}
+          <select id="target-select" name="target" disabled>
+            <option value="" disabled selected>Carregando…</option>
           </select>
         </label>
-        <button type="submit" id="submit">Atualizar</button>
-        <button type="button" id="run-traceroute">Run traceroute</button>
-      </form>
-      <p class="message" id="message"></p>
-      <div class="alert" id="alert-box" role="status" aria-live="polite" style="display:none"></div>
-      <section class="card">
-        <div class="chart-container">
-          <svg id="chart" viewBox="0 0 600 320" role="img" aria-label="GrÃ¡fico de RTT"></svg>
+        <label>
+          Range visual
+          <select id="range-select" name="range"></select>
+        </label>
+      </section>
+
+      <section class="kpi-grid" aria-live="polite">
+        <div class="kpi-card" data-kpi="ping-p95" title="${tooltipTexts.pingP95}">
+          <span class="kpi-label">RTT p95 (1m)</span>
+          <span class="kpi-value">—</span>
+        </div>
+        <div class="kpi-card" data-kpi="ping-avg" title="${tooltipTexts.pingAvg}">
+          <span class="kpi-label">RTT médio (1m)</span>
+          <span class="kpi-value">—</span>
+        </div>
+        <div class="kpi-card" data-kpi="ping-loss" title="${tooltipTexts.pingLoss}">
+          <span class="kpi-label">Perda (1m)</span>
+          <span class="kpi-value">—</span>
+        </div>
+        <div class="kpi-card" data-kpi="ping-availability" title="${tooltipTexts.pingAvailability}">
+          <span class="kpi-label">Disponibilidade (1m)</span>
+          <span class="kpi-value">—</span>
+        </div>
+        <div class="kpi-card" data-kpi="dns-lookup" title="${tooltipTexts.dnsLookup}">
+          <span class="kpi-label">DNS lookup (1m)</span>
+          <span class="kpi-value">—</span>
+        </div>
+        <div class="kpi-card" data-kpi="http-ttfb" title="${tooltipTexts.httpTtfb}">
+          <span class="kpi-label">TTFB (1m)</span>
+          <span class="kpi-value">—</span>
         </div>
       </section>
-      <section class="card">
-        <h2 style="margin-top:0">Resumo</h2>
-        <div class="summary-grid">
-          <div class="summary-item">
-            <div class="summary-label">Loss mÃ©dio (%)</div>
-            <div class="summary-value" id="summary-loss">--</div>
-          </div>
-          <div class="summary-item">
-            <div class="summary-label">P95 mais recente (ms)</div>
-            <div class="summary-value" id="summary-p95">--</div>
-          </div>
+
+      <section class="section-card" aria-label="Tendência das métricas">
+        <div class="section-header">
+          <h2>Tendência (média × p95)</h2>
+          <span class="last-update" id="sparkline-range-label">Últimos ${uiConfig.sparklineMinutes} minutos</span>
         </div>
-      </section>
-      <section class="card">
-        <h2 style="margin-top:0">Traceroute</h2>
-        <p class="message" id="traceroute-status"></p>
-        <div class="table-container" id="traceroute-table-container">
-          <table id="traceroute-table">
-            <thead>
-              <tr>
-                <th scope="col">#</th>
-                <th scope="col">IP</th>
-                <th scope="col">RTT1 (ms)</th>
-                <th scope="col">RTT2 (ms)</th>
-                <th scope="col">RTT3 (ms)</th>
-              </tr>
-            </thead>
-            <tbody id="traceroute-tbody"></tbody>
-          </table>
+        <div class="sparkline-chart">
+          <svg id="sparkline" viewBox="0 0 600 160" role="img" aria-label="Série histórica do alvo selecionado"></svg>
+          <div id="sparkline-empty">Sem dados suficientes.</div>
+        </div>
+        <div class="sparkline-legend">
+          <span class="legend-item"><span class="legend-dot avg"></span>Média (1m)</span>
+          <span class="legend-item"><span class="legend-dot p95"></span>P95 (1m)</span>
         </div>
       </section>
     </main>
+
     <script type="module">
-      const APP_CONFIG = ${JSON.stringify(appConfig)};
+      const UI_CONFIG = ${JSON.stringify(uiConfig)};
+      const TOOLTIP_EMPTY = "Sem dados no período.";
 
-      const RANGE_OPTIONS = APP_CONFIG.ranges;
-      const DEFAULT_RANGE = APP_CONFIG.defaultRange || "1h";
-      const DEFAULT_TARGET = APP_CONFIG.defaultTarget || "";
-      const ALERT_CONFIG = APP_CONFIG.alerts || {};
+      const rangeOptions = Array.isArray(UI_CONFIG.rangeOptions) && UI_CONFIG.rangeOptions.length
+        ? [...new Set(UI_CONFIG.rangeOptions.map((value) => Number.parseInt(value, 10)).filter((value) => Number.isFinite(value)))]
+            .sort((a, b) => a - b)
+        : [5, 10, 15];
+      const maxHistoryMinutes = rangeOptions[rangeOptions.length - 1] ?? 15;
+      const historyWindowMs = maxHistoryMinutes * 60 * 1000;
 
-      const ALERT_P95_MS = Number.isFinite(Number(ALERT_CONFIG.p95Ms))
-        ? Number(ALERT_CONFIG.p95Ms)
-        : 200;
-      const ALERT_LOSS_PCT = Number.isFinite(Number(ALERT_CONFIG.lossPct))
-        ? Number(ALERT_CONFIG.lossPct)
-        : 1;
-      const ALERT_MIN_POINTS = Number.isFinite(Number(ALERT_CONFIG.minPoints))
-        ? Number(ALERT_CONFIG.minPoints)
-        : 10;
+      const state = {
+        target: "",
+        rangeMinutes: rangeOptions.includes(Number(UI_CONFIG.sparklineMinutes))
+          ? Number(UI_CONFIG.sparklineMinutes)
+          : rangeOptions[rangeOptions.length - 1],
+      };
 
-      const form = document.getElementById("controls");
-      const targetInput = document.getElementById("target");
-      const targetDatalist = document.getElementById("target-options");
-      const rangeSelect = document.getElementById("range");
-      const submitButton = document.getElementById("submit");
-      const messageEl = document.getElementById("message");
-      const alertBox = document.getElementById("alert-box");
-      const chartSvg = document.getElementById("chart");
-      const summaryLoss = document.getElementById("summary-loss");
-      const summaryP95 = document.getElementById("summary-p95");
-      const tracerouteButton = document.getElementById("run-traceroute");
-      const tracerouteStatus = document.getElementById("traceroute-status");
-      const tracerouteTableContainer = document.getElementById("traceroute-table-container");
-      const tracerouteTbody = document.getElementById("traceroute-tbody");
+      const targetSelect = document.getElementById("target-select");
+      const rangeSelect = document.getElementById("range-select");
+      const statusBadge = document.getElementById("connection-status");
+      const lastUpdateEl = document.getElementById("last-update");
+      const sparklineSvg = document.getElementById("sparkline");
+      const sparklineEmpty = document.getElementById("sparkline-empty");
+      const sparklineRangeLabel = document.getElementById("sparkline-range-label");
 
-      function parseInitialState() {
-        const params = new URLSearchParams(window.location.search);
-        let range = params.get("range")?.toLowerCase() || "";
-        if (!RANGE_OPTIONS.includes(range)) {
-          range = RANGE_OPTIONS.includes(DEFAULT_RANGE) ? DEFAULT_RANGE : "1h";
+      const kpiDefs = {
+        pingP95: {
+          card: document.querySelector('[data-kpi="ping-p95"]'),
+          value: document.querySelector('[data-kpi="ping-p95"] .kpi-value'),
+          tooltip: "${tooltipTexts.pingP95}",
+          thresholdKey: "p95",
+          format: formatMs,
+        },
+        pingAvg: {
+          card: document.querySelector('[data-kpi="ping-avg"]'),
+          value: document.querySelector('[data-kpi="ping-avg"] .kpi-value'),
+          tooltip: "${tooltipTexts.pingAvg}",
+          thresholdKey: null,
+          format: formatMs,
+        },
+        pingLoss: {
+          card: document.querySelector('[data-kpi="ping-loss"]'),
+          value: document.querySelector('[data-kpi="ping-loss"] .kpi-value'),
+          tooltip: "${tooltipTexts.pingLoss}",
+          thresholdKey: "loss",
+          format: formatPct,
+        },
+        pingAvailability: {
+          card: document.querySelector('[data-kpi="ping-availability"]'),
+          value: document.querySelector('[data-kpi="ping-availability"] .kpi-value'),
+          tooltip: "${tooltipTexts.pingAvailability}",
+          thresholdKey: "loss",
+          format: formatPct,
+        },
+        dnsLookup: {
+          card: document.querySelector('[data-kpi="dns-lookup"]'),
+          value: document.querySelector('[data-kpi="dns-lookup"] .kpi-value'),
+          tooltip: "${tooltipTexts.dnsLookup}",
+          thresholdKey: "dns",
+          format: formatMs,
+        },
+        httpTtfb: {
+          card: document.querySelector('[data-kpi="http-ttfb"]'),
+          value: document.querySelector('[data-kpi="http-ttfb"] .kpi-value'),
+          tooltip: "${tooltipTexts.httpTtfb}",
+          thresholdKey: "ttfb",
+          format: formatMs,
+        },
+      };
+
+      const thresholds = UI_CONFIG.thresholds ?? {};
+      const history = new Map();
+      let latestPayload = null;
+      let eventSource = null;
+      let reconnectTimer = null;
+
+      function formatMs(value) {
+        if (!Number.isFinite(value)) {
+          return "—";
         }
-
-        let target = params.get("target")?.trim() || "";
-        if (!target) {
-          target = DEFAULT_TARGET;
+        if (Math.abs(value) >= 100) {
+          return `${Math.round(value)} ms`;
         }
-
-        return { range, target };
+        if (Math.abs(value) >= 10) {
+          return `${value.toFixed(1)} ms`;
+        }
+        return `${value.toFixed(2)} ms`;
       }
 
-      function setMessage(text, tone = "info") {
-        messageEl.textContent = text || "";
-        messageEl.style.color = tone === "error" ? "#f97316" : tone === "muted" ? "rgba(243,245,249,0.7)" : "#facc15";
+      function formatPct(value) {
+        if (!Number.isFinite(value)) {
+          return "—";
+        }
+        if (Math.abs(value) >= 10) {
+          return `${value.toFixed(1)} %`;
+        }
+        return `${value.toFixed(2)} %`;
       }
 
-      function setTracerouteStatus(text, tone = "info") {
-        tracerouteStatus.textContent = text || "";
-        tracerouteStatus.style.color =
-          tone === "error"
-            ? "#f97316"
-            : tone === "muted"
-            ? "rgba(243,245,249,0.7)"
-            : "#facc15";
-      }
-
-      function formatHopMetric(value) {
-        if (value === null || value === undefined) {
-          return "*";
-        }
-
-        const num = Number(value);
-        if (!Number.isFinite(num)) {
-          return "*";
-        }
-
-        if (num >= 100) {
-          return num.toFixed(0);
-        }
-        if (num >= 10) {
-          return num.toFixed(1);
-        }
-        return num.toFixed(2);
-      }
-
-      function renderTracerouteHops(hops) {
-        tracerouteTbody.innerHTML = "";
-        if (!hops || hops.length === 0) {
-          tracerouteTableContainer.style.display = "none";
-          return;
-        }
-
-        tracerouteTableContainer.style.display = "";
-        const fragment = document.createDocumentFragment();
-        for (const hop of hops) {
-          const row = document.createElement("tr");
-
-          const hopCell = document.createElement("td");
-          hopCell.textContent = hop?.hop ?? "";
-          row.appendChild(hopCell);
-
-          const ipCell = document.createElement("td");
-          ipCell.textContent = hop?.ip || "*";
-          row.appendChild(ipCell);
-
-          const rtt1Cell = document.createElement("td");
-          rtt1Cell.textContent = formatHopMetric(hop?.rtt1_ms);
-          row.appendChild(rtt1Cell);
-
-          const rtt2Cell = document.createElement("td");
-          rtt2Cell.textContent = formatHopMetric(hop?.rtt2_ms);
-          row.appendChild(rtt2Cell);
-
-          const rtt3Cell = document.createElement("td");
-          rtt3Cell.textContent = formatHopMetric(hop?.rtt3_ms);
-          row.appendChild(rtt3Cell);
-
-          fragment.appendChild(row);
-        }
-
-        tracerouteTbody.appendChild(fragment);
-      }
-
-      function extractTargets(payload) {
-        if (!payload) {
-          return [];
-        }
-        if (Array.isArray(payload)) {
-          const unique = new Set();
-          for (const row of payload) {
-            if (row?.target) {
-              unique.add(String(row.target));
-            }
-          }
-          return Array.from(unique);
-        }
-        if (typeof payload === "object") {
-          return Object.keys(payload);
-        }
-        return [];
-      }
-
-      function coerceNumber(value) {
+      function normalizeNumber(value) {
         const num = Number(value);
         return Number.isFinite(num) ? num : null;
       }
 
-      function formatNumber(value, digits = 2) {
-        if (value === null || value === undefined || Number.isNaN(value)) {
-          return "--";
+      function updateRangeSelect() {
+        rangeSelect.innerHTML = "";
+        for (const minutes of rangeOptions) {
+          const option = document.createElement("option");
+          option.value = String(minutes);
+          option.textContent = `${minutes} min`;
+          if (minutes === state.rangeMinutes) {
+            option.selected = true;
+          }
+          rangeSelect.appendChild(option);
         }
-        return Number(value).toFixed(digits);
+        sparklineRangeLabel.textContent = `Últimos ${state.rangeMinutes} minutos`;
       }
 
-      function formatNumberCompact(value, digits = 2) {
-        if (value === null || value === undefined || Number.isNaN(value)) {
-          return "--";
+      function applyThreshold(card, compareValue, thresholdKey) {
+        card.classList.remove("warn", "crit");
+        if (!thresholdKey) {
+          return;
         }
-        const fixed = Number(value).toFixed(digits);
-        return fixed.replace(/(\.\d*?[1-9])0+$/u, "$1").replace(/\.0+$/u, "");
+        const config = thresholds[thresholdKey];
+        if (!config) {
+          return;
+        }
+        if (!Number.isFinite(compareValue)) {
+          return;
+        }
+        const { warn, crit } = config;
+        if (Number.isFinite(crit) && compareValue >= crit) {
+          card.classList.add("crit");
+        } else if (Number.isFinite(warn) && compareValue >= warn) {
+          card.classList.add("warn");
+        }
       }
 
-      function computeMetrics(rows) {
-        const list = Array.isArray(rows) ? rows : [];
-        let latestP95 = null;
-        for (let i = list.length - 1; i >= 0; i -= 1) {
-          const value = coerceNumber(list[i]?.p95_ms);
-          if (value !== null) {
-            latestP95 = value;
-            break;
+      function updateMetric(key, value, compareValue = value) {
+        const def = kpiDefs[key];
+        if (!def) {
+          return;
+        }
+        const hasValue = Number.isFinite(value);
+        def.value.textContent = hasValue ? def.format(value) : "—";
+        def.card.setAttribute("title", hasValue ? def.tooltip : TOOLTIP_EMPTY);
+        applyThreshold(def.card, Number.isFinite(compareValue) ? compareValue : NaN, def.thresholdKey);
+      }
+
+      function updatePingMetrics(metrics) {
+        const win1m = metrics?.win1m ?? {};
+        const p95 = normalizeNumber(win1m.p95_ms);
+        const avg = normalizeNumber(win1m.avg_ms);
+        const loss = normalizeNumber(win1m.loss_pct);
+        const availability = loss === null ? null : Math.max(0, Math.min(100, 100 - loss));
+
+        updateMetric("pingP95", p95);
+        updateMetric("pingAvg", avg);
+        updateMetric("pingLoss", loss);
+        updateMetric("pingAvailability", availability, loss ?? NaN);
+      }
+
+      function updateAggregates(payload) {
+        const dnsAvg = normalizeNumber(payload?.dns?.aggregate?.win1m_avg_ms);
+        updateMetric("dnsLookup", dnsAvg);
+
+        const ttfbAvg = normalizeNumber(payload?.http?.aggregate?.ttfb?.win1m_avg_ms);
+        updateMetric("httpTtfb", ttfbAvg);
+      }
+
+      function pruneHistory(buffer, cutoff) {
+        while (buffer.length && buffer[0].ts < cutoff) {
+          buffer.shift();
+        }
+      }
+
+      function updateHistory(payload) {
+        const timestamp = Number(payload?.ts);
+        const baseTs = Number.isFinite(timestamp) ? timestamp : Date.now();
+        const cutoff = baseTs - historyWindowMs;
+
+        const ping = payload?.ping ?? {};
+        for (const [target, targetMetrics] of Object.entries(ping)) {
+          const win1m = targetMetrics?.win1m ?? {};
+          const entry = {
+            ts: baseTs,
+            avg: normalizeNumber(win1m.avg_ms),
+            p95: normalizeNumber(win1m.p95_ms),
+          };
+          let buffer = history.get(target);
+          if (!buffer) {
+            buffer = [];
+            history.set(target, buffer);
+          }
+          buffer.push(entry);
+          pruneHistory(buffer, cutoff);
+        }
+
+        for (const [target, buffer] of history.entries()) {
+          if (!ping[target]) {
+            pruneHistory(buffer, cutoff);
+          }
+        }
+      }
+
+      function renderSparkline(target) {
+        sparklineSvg.innerHTML = "";
+        if (!target) {
+          sparklineEmpty.style.display = "flex";
+          sparklineSvg.setAttribute("aria-hidden", "true");
+          return;
+        }
+
+        const now = Date.now();
+        const cutoff = now - state.rangeMinutes * 60 * 1000;
+        const buffer = history.get(target) || [];
+        const points = buffer.filter((entry) => entry.ts >= cutoff);
+
+        const values = [];
+        for (const entry of points) {
+          if (Number.isFinite(entry.avg)) {
+            values.push(entry.avg);
+          }
+          if (Number.isFinite(entry.p95)) {
+            values.push(entry.p95);
           }
         }
 
-        let lossTotal = 0;
-        let lossCount = 0;
-        for (const row of list) {
-          const loss = coerceNumber(row?.loss_pct);
-          if (loss !== null) {
-            lossTotal += loss;
-            lossCount += 1;
+        if (!points.length || !values.length) {
+          sparklineEmpty.style.display = "flex";
+          sparklineSvg.setAttribute("aria-hidden", "true");
+          return;
+        }
+
+        sparklineEmpty.style.display = "none";
+        sparklineSvg.setAttribute("aria-hidden", "false");
+        sparklineSvg.setAttribute("aria-label", `Série histórica do alvo ${target}`);
+
+        const width = 600;
+        const height = 160;
+        const padding = { top: 12, right: 12, bottom: 16, left: 12 };
+        sparklineSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+
+        const minTs = Math.min(cutoff, ...points.map((entry) => entry.ts));
+        const maxTs = Math.max(...points.map((entry) => entry.ts), minTs + 1);
+        const rangeTs = Math.max(maxTs - minTs, 1);
+
+        const minValue = values.reduce((acc, value) => (value < acc ? value : acc), values[0]);
+        const maxValue = values.reduce((acc, value) => (value > acc ? value : acc), values[0]);
+        const expand = (maxValue - minValue) * 0.1;
+        const valueMin = minValue - expand;
+        const valueMax = maxValue + expand;
+        const valueRange = Math.max(valueMax - valueMin, 1);
+
+        const projectX = (ts) => {
+          return (
+            padding.left +
+            ((ts - minTs) / rangeTs) * (width - padding.left - padding.right)
+          );
+        };
+
+        const projectY = (value) => {
+          const clamped = Math.max(Math.min(value, valueMax), valueMin);
+          return (
+            height -
+            padding.bottom -
+            ((clamped - valueMin) / valueRange) * (height - padding.top - padding.bottom)
+          );
+        };
+
+        function buildPath(pointsList, key, color) {
+          const valid = pointsList.filter((entry) => Number.isFinite(entry[key]));
+          if (!valid.length) {
+            return null;
+          }
+          const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+          const d = valid
+            .map((entry, index) => {
+              const command = index === 0 ? "M" : "L";
+              const x = projectX(entry.ts).toFixed(2);
+              const y = projectY(entry[key]).toFixed(2);
+              return `${command}${x},${y}`;
+            })
+            .join(" ");
+          path.setAttribute("d", d);
+          path.setAttribute("fill", "none");
+          path.setAttribute("stroke", color);
+          path.setAttribute("stroke-width", "2.4");
+          path.setAttribute("stroke-linejoin", "round");
+          path.setAttribute("stroke-linecap", "round");
+          return path;
+        }
+
+        const avgPath = buildPath(points, "avg", "#38bdf8");
+        const p95Path = buildPath(points, "p95", "#34d399");
+
+        if (avgPath) {
+          sparklineSvg.appendChild(avgPath);
+        }
+        if (p95Path) {
+          sparklineSvg.appendChild(p95Path);
+        }
+      }
+
+      function setConnectionStatus(mode) {
+        statusBadge.classList.remove("connecting", "reconnecting");
+        if (mode === "live") {
+          statusBadge.textContent = "Atualizando ao vivo…";
+        } else if (mode === "reconnecting") {
+          statusBadge.classList.add("reconnecting");
+          statusBadge.textContent = "Reconectando…";
+        } else {
+          statusBadge.classList.add("connecting");
+          statusBadge.textContent = "Conectando…";
+        }
+      }
+
+      function updateLastUpdate(ts) {
+        const timestamp = Number(ts);
+        if (!Number.isFinite(timestamp)) {
+          lastUpdateEl.textContent = "—";
+          return;
+        }
+        const formatter = new Intl.DateTimeFormat("pt-BR", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+        lastUpdateEl.textContent = formatter.format(new Date(timestamp));
+      }
+
+      function updateTargetOptions(payloadTargets) {
+        const options = Array.from(new Set(payloadTargets || [])).filter(Boolean).sort();
+        const previous = state.target;
+
+        if (options.length === 0) {
+          state.target = "";
+          targetSelect.innerHTML = '<option value="" disabled selected>Sem alvos</option>';
+          targetSelect.disabled = true;
+          return;
+        }
+
+        targetSelect.disabled = false;
+        targetSelect.innerHTML = "";
+        for (const target of options) {
+          const option = document.createElement("option");
+          option.value = target;
+          option.textContent = target;
+          targetSelect.appendChild(option);
+        }
+
+        if (!previous) {
+          if (UI_CONFIG.defaultTarget && options.includes(UI_CONFIG.defaultTarget)) {
+            state.target = UI_CONFIG.defaultTarget;
+          } else {
+            state.target = options[0];
+          }
+        } else if (!options.includes(previous)) {
+          if (UI_CONFIG.defaultTarget && options.includes(UI_CONFIG.defaultTarget)) {
+            state.target = UI_CONFIG.defaultTarget;
+          } else {
+            state.target = options[0];
           }
         }
 
-        const avgLoss = lossCount > 0 ? lossTotal / lossCount : null;
+        targetSelect.value = state.target;
+      }
 
-        return {
-          pointsCount: list.length,
-          latestP95,
-          avgLoss,
+      function handlePayload(payload) {
+        latestPayload = payload;
+        const targets = Object.keys(payload?.ping ?? {});
+        updateTargetOptions(targets);
+        updateHistory(payload);
+        updatePingMetrics(state.target ? payload?.ping?.[state.target] : null);
+        updateAggregates(payload);
+        renderSparkline(state.target);
+        updateLastUpdate(payload?.ts);
+      }
+
+      function connect(isReconnect = false) {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+
+        setConnectionStatus(isReconnect ? "reconnecting" : "connecting");
+        eventSource = new EventSource("/live/metrics");
+
+        eventSource.onopen = () => {
+          setConnectionStatus("live");
+        };
+
+        eventSource.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            handlePayload(payload);
+          } catch (error) {
+            console.error("Falha ao processar payload de métricas:", error);
+          }
+        };
+
+        eventSource.onerror = () => {
+          setConnectionStatus("reconnecting");
+          if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+          }
+          if (!reconnectTimer) {
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              connect(true);
+            }, Number(UI_CONFIG.sseRetryMs) || 3000);
+          }
         };
       }
 
-      function hideAlert() {
-        if (!alertBox) {
-          return;
-        }
-        alertBox.style.display = "none";
-        alertBox.textContent = "";
-      }
-
-        showAlert(\`Alerta: \${triggered.join(" e ")}.\`);
-        if (!alertBox) {
-          return;
-        }
-        alertBox.textContent = text;
-        alertBox.style.display = "block";
-      }
-
-      function updateAlertBox(rows) {
-        if (!alertBox) {
-          return;
-        }
-
-        const { pointsCount, latestP95, avgLoss } = computeMetrics(rows);
-
-        if (pointsCount < ALERT_MIN_POINTS) {
-          hideAlert();
-          return;
-        }
-
-        const triggered = [];
-
-        if (latestP95 !== null && latestP95 > ALERT_P95_MS) {
-          triggered.push(
-            "p95 " +
-              formatNumberCompact(latestP95, 0) +
-              " ms (> " +
-              formatNumberCompact(ALERT_P95_MS, 0) +
-              " ms)"
-          );
-        }
-
-        if (avgLoss !== null && avgLoss > ALERT_LOSS_PCT) {
-          triggered.push(
-            "perda media " +
-              formatNumberCompact(avgLoss, 2) +
-              "% (> " +
-              formatNumberCompact(ALERT_LOSS_PCT, 2) +
-              "%)"
-          );
-        }
-
-        if (triggered.length === 0) {
-          hideAlert();
-          return;
-        }
-
-        showAlert(\`Alerta: \${triggered.join(" e ")}.\`);
-      }
-
-      function renderSummary(rows) {
-        if (!rows || rows.length === 0) {
-          summaryLoss.textContent = "--";
-          summaryP95.textContent = "--";
-          return;
-        }
-
-        const { avgLoss, latestP95 } = computeMetrics(rows);
-
-        summaryLoss.textContent = avgLoss !== null ? formatNumber(avgLoss, 2) : "--";
-        summaryP95.textContent = latestP95 !== null ? formatNumber(latestP95, 0) : "--";
-      }
-
-      function renderChart(rows) {
-        chartSvg.innerHTML = "";
-        if (!rows || rows.length === 0) {
-          const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-          text.setAttribute("x", "50%");
-          text.setAttribute("y", "50%");
-          text.setAttribute("dominant-baseline", "middle");
-          text.setAttribute("text-anchor", "middle");
-          text.textContent = "Sem dados no perÃ­odo selecionado.";
-          chartSvg.appendChild(text);
-          return;
-        }
-
-        const padding = { top: 16, right: 32, bottom: 32, left: 48 };
-        const width = 600;
-        const height = 320;
-        chartSvg.setAttribute("viewBox", "0 0 " + width + " " + height);
-
-        const points = rows.map((row) => ({
-          ts: coerceNumber(row.ts_min),
-          p50: coerceNumber(row.p50_ms),
-          p95: coerceNumber(row.p95_ms),
-        })).filter((row) => row.ts !== null);
-
-        if (points.length === 0) {
-          const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-          text.setAttribute("x", "50%");
-          text.setAttribute("y", "50%");
-          text.setAttribute("dominant-baseline", "middle");
-          text.setAttribute("text-anchor", "middle");
-          text.textContent = "Sem dados no perÃ­odo selecionado.";
-          chartSvg.appendChild(text);
-          return;
-        }
-
-        const minTs = points.reduce((min, p) => (p.ts < min ? p.ts : min), points[0].ts);
-        const maxTs = points.reduce((max, p) => (p.ts > max ? p.ts : max), points[0].ts);
-        const minValue = points.reduce((min, p) => {
-          const values = [p.p50, p.p95].filter((v) => v !== null);
-          if (values.length === 0) {
-            return min;
-          }
-          const localMin = Math.min(...values);
-          return localMin < min ? localMin : min;
-        }, Number.POSITIVE_INFINITY);
-        const maxValue = points.reduce((max, p) => {
-          const values = [p.p50, p.p95].filter((v) => v !== null);
-          if (values.length === 0) {
-            return max;
-          }
-          const localMax = Math.max(...values);
-          return localMax > max ? localMax : max;
-        }, Number.NEGATIVE_INFINITY);
-
-        if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
-          const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-          text.setAttribute("x", "50%");
-          text.setAttribute("y", "50%");
-          text.setAttribute("dominant-baseline", "middle");
-          text.setAttribute("text-anchor", "middle");
-          text.textContent = "Sem dados no perÃ­odo selecionado.";
-          chartSvg.appendChild(text);
-          return;
-        }
-
-        const rangeTs = maxTs - minTs || 1;
-        const rangeValue = maxValue - minValue || 1;
-
-        function projectX(ts) {
-          return padding.left + ((ts - minTs) / rangeTs) * (width - padding.left - padding.right);
-        }
-
-        function projectY(value) {
-          const normalized = (value - minValue) / rangeValue;
-          return height - padding.bottom - normalized * (height - padding.top - padding.bottom);
-        }
-
-        const axis = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        axis.setAttribute("stroke", "rgba(255,255,255,0.2)");
-        axis.setAttribute("fill", "none");
-
-        const xAxis = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        xAxis.setAttribute("x1", padding.left);
-        xAxis.setAttribute("x2", width - padding.right);
-        xAxis.setAttribute("y1", height - padding.bottom);
-        xAxis.setAttribute("y2", height - padding.bottom);
-        axis.appendChild(xAxis);
-
-        const yAxis = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        yAxis.setAttribute("x1", padding.left);
-        yAxis.setAttribute("x2", padding.left);
-        yAxis.setAttribute("y1", padding.top);
-        yAxis.setAttribute("y2", height - padding.bottom);
-        axis.appendChild(yAxis);
-
-        chartSvg.appendChild(axis);
-
-        const gridLines = 4;
-        for (let i = 0; i <= gridLines; i += 1) {
-          const fraction = i / gridLines;
-          const y = padding.top + (1 - fraction) * (height - padding.top - padding.bottom);
-          const grid = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          grid.setAttribute("x1", padding.left);
-          grid.setAttribute("x2", width - padding.right);
-          grid.setAttribute("y1", y);
-          grid.setAttribute("y2", y);
-          grid.setAttribute("stroke", "rgba(255,255,255,0.08)");
-          chartSvg.appendChild(grid);
-
-          const labelValue = minValue + fraction * rangeValue;
-          const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-          label.setAttribute("x", padding.left - 8);
-          label.setAttribute("y", y + 4);
-          label.setAttribute("text-anchor", "end");
-          label.setAttribute("fill", "rgba(255,255,255,0.7)");
-          label.setAttribute("font-size", "11");
-          label.textContent = formatNumber(labelValue, 0);
-          chartSvg.appendChild(label);
-        }
-
-        const timestampFormatter = new Intl.DateTimeFormat(undefined, {
-          hour: "2-digit",
-          minute: "2-digit",
-          day: "2-digit",
-          month: "2-digit",
-        });
-
-        const xLabels = 4;
-        for (let i = 0; i <= xLabels; i += 1) {
-          const fraction = i / xLabels;
-          const ts = minTs + fraction * rangeTs;
-          const x = projectX(ts);
-          const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-          label.setAttribute("x", x);
-          label.setAttribute("y", height - padding.bottom + 20);
-          label.setAttribute("text-anchor", "middle");
-          label.setAttribute("fill", "rgba(255,255,255,0.7)");
-          label.setAttribute("font-size", "11");
-          label.textContent = timestampFormatter.format(new Date(ts));
-          chartSvg.appendChild(label);
-        }
-
-        function buildPolyline(values, color) {
-          const pointsAttr = values
-            .map((point) => {
-              const value = point.value ?? null;
-              if (value === null) {
-                return null;
-              }
-              const x = projectX(point.ts).toFixed(2);
-              const y = projectY(value).toFixed(2);
-              return x + "," + y;
-            })
-            .filter(Boolean)
-            .join(" ");
-
-          const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-          polyline.setAttribute("fill", "none");
-          polyline.setAttribute("stroke-width", "2.5");
-          polyline.setAttribute("stroke", color);
-          polyline.setAttribute("points", pointsAttr);
-          return polyline;
-        }
-
-        const p50Series = points.map((p) => ({ ts: p.ts, value: p.p50 }));
-        const p95Series = points.map((p) => ({ ts: p.ts, value: p.p95 }));
-
-        chartSvg.appendChild(buildPolyline(p50Series, "#38bdf8"));
-        chartSvg.appendChild(buildPolyline(p95Series, "#f97316"));
-
-        const legend = document.createElementNS("http://www.w3.org/2000/svg", "g");
-        legend.setAttribute("transform", "translate(" + padding.left + ", " + padding.top + ")");
-
-        function legendItem(label, color, index) {
-          const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-          group.setAttribute("transform", "translate(" + index * 140 + ", 0)");
-
-          const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          line.setAttribute("x1", 0);
-          line.setAttribute("x2", 24);
-          line.setAttribute("y1", 0);
-          line.setAttribute("y2", 0);
-          line.setAttribute("stroke", color);
-          line.setAttribute("stroke-width", "3");
-          group.appendChild(line);
-
-          const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-          text.setAttribute("x", 32);
-          text.setAttribute("y", 4);
-          text.setAttribute("fill", "rgba(255,255,255,0.9)");
-          text.setAttribute("font-size", "12");
-          text.textContent = label;
-          group.appendChild(text);
-
-          return group;
-        }
-
-        legend.appendChild(legendItem("p50 ms", "#38bdf8", 0));
-        legend.appendChild(legendItem("p95 ms", "#f97316", 1));
-        chartSvg.appendChild(legend);
-      }
-
-      function updateTargetOptions(list) {
-        targetDatalist.innerHTML = "";
-        list.forEach((target) => {
-          const option = document.createElement("option");
-          option.value = target;
-          targetDatalist.appendChild(option);
-        });
-      }
-
-      async function fetchWindow(range, target) {
-        const params = new URLSearchParams({ range });
-        if (target) {
-          params.set("target", target);
-        }
-
-        const response = await fetch("/api/ping/window?" + params.toString());
-        if (!response.ok) {
-          throw new Error("Falha ao carregar dados (" + response.status + ")");
-        }
-        const payload = await response.json();
-
-        const targets = extractTargets(payload);
-        let resolvedTarget = target;
-        let rows;
-
-        if (!resolvedTarget && targets.length > 0) {
-          resolvedTarget = targets[0];
-        }
-
-        if (Array.isArray(payload)) {
-          rows = payload;
-          if (!resolvedTarget && rows.length > 0 && rows[0].target) {
-            resolvedTarget = String(rows[0].target);
-          }
-        } else if (resolvedTarget) {
-          rows = payload?.[resolvedTarget] ?? [];
-        } else {
-          rows = [];
-        }
-
-        return { rows, targets, target: resolvedTarget ?? "" };
-      }
-
-      function updateQueryString(range, target) {
-        const url = new URL(window.location.href);
-        url.searchParams.set("range", range);
-        if (target) {
-          url.searchParams.set("target", target);
-        } else {
-          url.searchParams.delete("target");
-        }
-        window.history.replaceState(null, "PingFlux", url.toString());
-      }
-
-      async function load(range, target) {
-        setMessage("Carregando dados...", "muted");
-        submitButton.disabled = true;
-
-        try {
-          const { rows, targets, target: resolvedTarget } = await fetchWindow(range, target);
-          updateTargetOptions(targets);
-          targetInput.value = resolvedTarget;
-          rangeSelect.value = range;
-          updateQueryString(range, resolvedTarget);
-
-          if (!rows || rows.length === 0) {
-            setMessage("Sem dados no perÃ­odo selecionado.", "muted");
-          } else {
-            setMessage("");
-          }
-
-          renderChart(rows);
-          renderSummary(rows);
-          updateAlertBox(rows);
-        } catch (error) {
-          console.error(error);
-          setMessage(error.message || "Erro ao carregar dados.", "error");
-          renderChart([]);
-          renderSummary([]);
-          updateAlertBox([]);
-        } finally {
-          submitButton.disabled = false;
-        }
-      }
-
-      setTracerouteStatus("Execute um traceroute para ver os hops.", "muted");
-      tracerouteTableContainer.style.display = "none";
-
-      const initial = parseInitialState();
-      rangeSelect.value = initial.range;
-      targetInput.value = initial.target;
-
-      form.addEventListener("submit", (event) => {
-        event.preventDefault();
-        const range = rangeSelect.value;
-        const target = targetInput.value.trim();
-        load(range, target);
+      rangeSelect.addEventListener("change", (event) => {
+        const minutes = Number.parseInt(event.target.value, 10);
+        state.rangeMinutes = rangeOptions.includes(minutes) ? minutes : state.rangeMinutes;
+        updateRangeSelect();
+        renderSparkline(state.target);
       });
 
-      tracerouteButton.addEventListener("click", async () => {
-        const target = targetInput.value.trim();
-        tracerouteButton.disabled = true;
-        setTracerouteStatus("Executando traceroute...", "muted");
-        renderTracerouteHops([]);
-
-        try {
-          const response = await fetch("/actions/traceroute", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ target }),
-          });
-
-          if (!response.ok) {
-            let errorMessage = "Falha ao iniciar traceroute.";
-            try {
-              const payload = await response.json();
-              if (payload?.error) {
-                errorMessage = String(payload.error);
-              }
-            } catch (error) {
-              // Ignore body parsing errors.
-            }
-            throw new Error(errorMessage);
-          }
-
-          const actionResult = await response.json();
-          const rawId = actionResult?.id;
-          if (rawId === null || rawId === undefined || rawId === "") {
-            throw new Error("Resposta invÃ¡lida da aÃ§Ã£o de traceroute.");
-          }
-
-          const id = String(rawId);
-          setTracerouteStatus("Carregando resultado...", "muted");
-
-          const resultResponse = await fetch("/api/traceroute/" + encodeURIComponent(id));
-          if (!resultResponse.ok) {
-            throw new Error("Falha ao carregar resultado do traceroute.");
-          }
-
-          const resultPayload = await resultResponse.json();
-          const hops = Array.isArray(resultPayload?.hops) ? resultPayload.hops : [];
-          renderTracerouteHops(hops);
-
-          if (!hops.length) {
-            setTracerouteStatus(
-              resultPayload?.success === 1
-                ? "Nenhum hop retornado."
-                : "Traceroute finalizado sem dados.",
-              resultPayload?.success === 1 ? "muted" : "error"
-            );
-          } else if (resultPayload?.success === 1) {
-            setTracerouteStatus("Traceroute concluÃ­do.", "muted");
-          } else {
-            setTracerouteStatus("Traceroute finalizado com falha.", "error");
-          }
-        } catch (error) {
-          renderTracerouteHops([]);
-          setTracerouteStatus(error.message || "Falha ao executar traceroute.", "error");
-        } finally {
-          tracerouteButton.disabled = false;
+      targetSelect.addEventListener("change", (event) => {
+        const value = String(event.target.value || "").trim();
+        if (!value) {
+          return;
+        }
+        state.target = value;
+        if (latestPayload) {
+          updatePingMetrics(latestPayload?.ping?.[state.target] ?? null);
+          renderSparkline(state.target);
         }
       });
 
-      load(initial.range, initial.target);
+      updateRangeSelect();
+      connect();
+
+      window.addEventListener("beforeunload", () => {
+        if (eventSource) {
+          eventSource.close();
+        }
+      });
     </script>
   </body>
 </html>`;
 }
-
 function resolveRangeWindow(rawRange) {
   const normalized = typeof rawRange === "string" ? rawRange.trim().toLowerCase() : "";
   const rangeKey = RANGE_TO_DURATION_MS[normalized] ? normalized : "1h";
@@ -1038,6 +1010,11 @@ function createRequestHandler(db, appConfig, options = {}) {
       } catch (error) {
         sendJson(res, 500, { status: "error", message: error?.message ?? "Unknown" });
       }
+      return;
+    }
+
+    if (method === "GET" && parsedUrl.pathname === "/api/ui-config") {
+      sendJson(res, 200, getUiConfig(appConfig));
       return;
     }
 
@@ -1244,18 +1221,17 @@ export async function startServer({
   const providedHost = typeof host === "string" ? host.trim() : "";
   const listenHost = providedHost === "127.0.0.1" ? "127.0.0.1" : "127.0.0.1";
 
-  const appConfig = {
+  const appConfig = getUiConfig({
     defaultTarget: UI_DEFAULT_TARGET,
-    defaultRange: UI_DEFAULT_RANGE,
-    ranges: RANGE_OPTIONS,
-    alerts: config?.alerts
-      ? {
-          p95Ms: config.alerts.p95Ms,
-          lossPct: config.alerts.lossPct,
-          minPoints: config.alerts.minPoints,
-        }
-      : null,
-  };
+    sparklineMinutes: UI_SPARKLINE_MINUTES,
+    sseRetryMs: UI_SSE_RETRY_MS,
+    thresholds: {
+      p95: { warn: THRESH_P95_WARN_MS, crit: THRESH_P95_CRIT_MS },
+      loss: { warn: THRESH_LOSS_WARN_PCT, crit: THRESH_LOSS_CRIT_PCT },
+      dns: { warn: THRESH_DNS_WARN_MS, crit: THRESH_DNS_CRIT_MS },
+      ttfb: { warn: THRESH_TTFB_WARN_MS, crit: THRESH_TTFB_CRIT_MS },
+    },
+  });
 
   const { handler, liveMetrics } = createRequestHandler(db, appConfig, {
     live: {
