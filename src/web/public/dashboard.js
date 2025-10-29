@@ -44,6 +44,10 @@ const DNS_HISTORY_LIMIT_MS = 60 * 60 * 1000;
 
 const thresholds = CONFIG.thresholds ?? {};
 const HEATMAP_ENABLED = Boolean(CONFIG.UI_ENABLE_HEATMAP);
+const initialViewportWidth =
+  typeof window !== "undefined"
+    ? window.innerWidth || document.documentElement.clientWidth || 0
+    : 0;
 
 function getWindowKeyFromMinutes(minutes) {
   const normalized = Number(minutes);
@@ -127,6 +131,8 @@ const state = {
   tracerouteLoading: false,
   tracerouteExpanded: false,
   targetIndicators: new Map(),
+  viewportWidth: initialViewportWidth,
+  compactMode: initialViewportWidth > 0 && initialViewportWidth < 1024,
 };
 
 const refs = {
@@ -147,6 +153,8 @@ const refs = {
   pageShell: document.querySelector(".page-shell"),
   networkStatusBar: document.getElementById("networkStatusBar"),
   networkStatusText: document.getElementById("networkStatusText"),
+  heatmapPanel: document.querySelector("[data-heatmap-panel]"),
+  traceroutePanel: document.querySelector(".panel-traceroute"),
 };
 
 const windowLabelRefs = new Map();
@@ -156,6 +164,64 @@ document.querySelectorAll("[data-window-label]").forEach((node) => {
     windowLabelRefs.set(key, node);
   }
 });
+
+function getViewportWidth() {
+  return typeof window !== "undefined"
+    ? window.innerWidth || document.documentElement.clientWidth || 0
+    : state.viewportWidth;
+}
+
+function updatePanelVisibility() {
+  if (refs.heatmapPanel) {
+    refs.heatmapPanel.hidden = !HEATMAP_ENABLED || state.compactMode;
+  }
+  if (refs.traceroutePanel) {
+    refs.traceroutePanel.hidden = state.compactMode;
+  }
+}
+
+function bootstrapLayout() {
+  state.viewportWidth = getViewportWidth();
+  state.compactMode = state.viewportWidth > 0 && state.viewportWidth < 1024;
+  const isMedium = !state.compactMode && state.viewportWidth < 1280;
+  document.body.classList.toggle("is-compact", state.compactMode);
+  document.body.classList.toggle("is-medium", isMedium);
+  updatePanelVisibility();
+}
+
+let resizeFrame = null;
+
+function updateLayoutClasses() {
+  const width = getViewportWidth();
+  const wasCompact = state.compactMode;
+  state.viewportWidth = width;
+  state.compactMode = width > 0 && width < 1024;
+  const isMedium = !state.compactMode && width < 1280;
+  document.body.classList.toggle("is-compact", state.compactMode);
+  document.body.classList.toggle("is-medium", isMedium);
+  updatePanelVisibility();
+  if (wasCompact !== state.compactMode && charts.availability) {
+    configureGauge();
+    const summary = getCurrentWindowSummary();
+    const availability = summary?.win_availability_pct ?? null;
+    updateGauge(availability);
+  }
+  if (wasCompact !== state.compactMode) {
+    renderHeatmap();
+    renderTraceroute();
+  }
+  resizeCharts();
+}
+
+function handleResize() {
+  if (resizeFrame) {
+    cancelAnimationFrame(resizeFrame);
+  }
+  resizeFrame = requestAnimationFrame(() => {
+    resizeFrame = null;
+    updateLayoutClasses();
+  });
+}
 
 const kpiCards = Array.from(document.querySelectorAll(".kpi-card")).map((card) => {
   const key = card.getAttribute("data-kpi");
@@ -182,6 +248,16 @@ const chartOverlays = new Map();
 function normalize(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function getCssVar(name, fallback) {
+  try {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name);
+    const trimmed = value != null ? value.trim() : "";
+    return trimmed || fallback;
+  } catch (error) {
+    return fallback;
+  }
 }
 
 const numberFormatters = new Map();
@@ -256,9 +332,11 @@ function init() {
   mountTheme();
   mountRangeButtons();
   mountControls();
+  bootstrapLayout();
   applyHeatmapVisibility();
   initChartOverlays();
   initCharts();
+  updateLayoutClasses();
   openLiveStream();
   if (state.selectedTarget) {
     bootstrapTargetData(state.selectedTarget).catch(() => {});
@@ -268,6 +346,7 @@ function init() {
   scheduleRender();
   updateNetworkStatus();
   startEventsRefreshTimer();
+  window.addEventListener("resize", handleResize);
 }
 
 function applyTooltips() {
@@ -280,11 +359,10 @@ function applyTooltips() {
 }
 
 function applyHeatmapVisibility() {
-  const panel = document.querySelector("[data-heatmap-panel]");
-  if (!panel) {
+  if (!refs.heatmapPanel) {
     return;
   }
-  panel.hidden = !HEATMAP_ENABLED;
+  refs.heatmapPanel.hidden = !HEATMAP_ENABLED || state.compactMode;
 }
 
 function initChartOverlays() {
@@ -489,10 +567,6 @@ function initCharts() {
   configureSparkline(charts.dns, "#38bdf8");
   configureSparkline(charts.httpTtfb, "#f97316");
   configureSparkline(charts.httpTotal, "#8b5cf6");
-
-  window.addEventListener("resize", () => {
-    resizeCharts();
-  });
 }
 
 function configureLatencyChart() {
@@ -507,10 +581,11 @@ function configureLatencyChart() {
       textStyle: {
         color:
           getComputedStyle(document.documentElement).getPropertyValue("--text-muted") || "#94a3b8",
+        fontSize: 11,
       },
       data: ["RTT por amostra", "Perda"],
     },
-    grid: { left: 60, right: 40, top: 40, bottom: 80 },
+    grid: { left: 48, right: 32, top: 40, bottom: 70, containLabel: true },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "line" },
@@ -553,15 +628,20 @@ function configureLatencyChart() {
       type: "time",
       boundaryGap: false,
       axisLine: { lineStyle: { color: "rgba(148, 163, 184, 0.3)" } },
-      axisLabel: { color: "var(--text-muted)" },
+      axisLabel: { color: "var(--text-muted)", hideOverlap: true, fontSize: 11 },
+      splitNumber: 6,
       splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.15)" } },
+      axisTick: { show: false },
     },
     yAxis: {
       type: "value",
       name: "ms",
-      nameTextStyle: { color: "var(--text-muted)" },
+      min: 0,
+      splitNumber: 6,
+      nameTextStyle: { color: "var(--text-muted)", fontSize: 11 },
       axisLabel: {
         color: "var(--text-muted)",
+        fontSize: 11,
         formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)} ms` : value),
       },
       splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.12)" } },
@@ -570,11 +650,11 @@ function configureLatencyChart() {
       {
         name: "RTT por amostra",
         type: "line",
-        step: "end",
+        step: false,
         showSymbol: false,
         symbolSize: 6,
-        smooth: false,
-        lineStyle: { width: 2.4, color: "#38bdf8" },
+        smooth: 0.4,
+        lineStyle: { width: 2, color: "#38bdf8" },
         emphasis: { focus: "series" },
         data: [],
       },
@@ -607,17 +687,17 @@ function configureHeatmap() {
       borderWidth: 0,
       textStyle: { color: "#e2e8f0" },
     },
-    grid: { left: 80, right: 20, bottom: 50, top: 30 },
+    grid: { left: 60, right: 24, bottom: 48, top: 30, containLabel: true },
     xAxis: {
       type: "time",
-      axisLabel: { color: "var(--text-muted)" },
+      axisLabel: { color: "var(--text-muted)", fontSize: 11, hideOverlap: true },
       axisLine: { lineStyle: { color: "rgba(148,163,184,0.25)" } },
       splitLine: { show: false },
     },
     yAxis: {
       type: "category",
       data: HEAT_LABELS,
-      axisLabel: { color: "var(--text-muted)" },
+      axisLabel: { color: "var(--text-muted)", fontSize: 11 },
       axisLine: { lineStyle: { color: "rgba(148,163,184,0.25)" } },
       splitLine: { show: false },
     },
@@ -647,7 +727,53 @@ function configureGauge() {
   if (!charts.availability) {
     return;
   }
+  const baseLabelColor = getCssVar("--text-base", "#e6edf3");
+  if (state.compactMode) {
+    charts.availability.setOption({
+      animationDuration: 220,
+      grid: { left: 14, right: 24, top: 20, bottom: 28, containLabel: true },
+      xAxis: {
+        type: "value",
+        min: 0,
+        max: 100,
+        splitNumber: 5,
+        axisLabel: {
+          color: "var(--text-muted)",
+          fontSize: 11,
+          formatter: (val) => `${Math.round(val)}%`,
+        },
+        axisTick: { show: false },
+        axisLine: { lineStyle: { color: "rgba(88, 166, 255, 0.25)" } },
+        splitLine: { show: false },
+      },
+      yAxis: {
+        type: "category",
+        data: ["Disponibilidade"],
+        axisTick: { show: false },
+        axisLine: { show: false },
+        axisLabel: { color: "var(--text-muted)", fontSize: 11 },
+      },
+      series: [
+        {
+          type: "bar",
+          data: [0],
+          barWidth: 22,
+          itemStyle: { borderRadius: [12, 12, 12, 12], color: "#3fb950" },
+          label: {
+            show: true,
+            position: "right",
+            color: baseLabelColor,
+            fontWeight: 600,
+            formatter: () => "—",
+          },
+          animationDuration: 240,
+        },
+      ],
+    });
+    return;
+  }
   charts.availability.setOption({
+    animationDuration: 240,
     series: [
       {
         type: "gauge",
@@ -660,23 +786,23 @@ function configureGauge() {
           lineStyle: {
             width: 18,
             color: [
-              [0.95, "#ef4444"],
-              [0.99, "#facc15"],
-              [1, "#22c55e"],
+              [0.8, "#f85149"],
+              [0.95, "#d29922"],
+              [1, "#3fb950"],
             ],
           },
         },
         pointer: {
           width: 6,
           show: false,
-          itemStyle: { color: "#22c55e" },
+          itemStyle: { color: "#3fb950" },
         },
         axisTick: { show: false },
         splitLine: { length: 12, distance: 6, lineStyle: { color: "rgba(148,163,184,0.25)" } },
-        axisLabel: { color: "var(--text-muted)", distance: 10, fontSize: 12 },
+        axisLabel: { color: "var(--text-muted)", distance: 10, fontSize: 11 },
         detail: {
           fontSize: 30,
-          color: "#64748b",
+          color: "#8b949e",
           valueAnimation: true,
           formatter: () => "—",
         },
@@ -1147,16 +1273,13 @@ function getAvailabilityColor(value) {
   if (value == null || !Number.isFinite(value)) {
     return "#64748b";
   }
-  if (value >= 99) {
-    return "#22c55e";
-  }
   if (value >= 95) {
-    return "#facc15";
+    return "#3fb950";
   }
-  if (value < 95) {
-    return "#ef4444";
+  if (value >= 80) {
+    return "#d29922";
   }
-  return "#64748b";
+  return "#f85149";
 }
 
 function updateGauge(value) {
@@ -1165,13 +1288,31 @@ function updateGauge(value) {
   }
   const numeric = Number.isFinite(value) ? clampGaugeValue(value) : null;
   const color = getAvailabilityColor(numeric);
+  const baseLabelColor = getCssVar("--text-base", "#e6edf3");
+  if (state.compactMode) {
+    const labelColor = color === "#f85149" ? "#f85149" : baseLabelColor;
+    charts.availability.setOption({
+      series: [
+        {
+          data: [numeric ?? 0],
+          itemStyle: { color },
+          label: {
+            formatter: () => (numeric == null ? "—" : fmtPct(numeric)),
+            color: labelColor,
+          },
+        },
+      ],
+      xAxis: { min: 0, max: 100 },
+    });
+    return;
+  }
   const axisColor =
     numeric == null
       ? [[1, "#475569"]]
       : [
-          [0.95, "#ef4444"],
-          [0.99, "#facc15"],
-          [1, "#22c55e"],
+          [0.8, "#f85149"],
+          [0.95, "#d29922"],
+          [1, "#3fb950"],
         ];
   charts.availability.setOption({
     series: [
@@ -1300,6 +1441,12 @@ function updateKpi(key, value, options = {}) {
   } else {
     card.valueEl.removeAttribute("title");
     card.element.removeAttribute("data-loading");
+  }
+  const hasValue = !isInsufficient && valueText !== "—";
+  if (hasValue) {
+    card.element.setAttribute("data-active", "true");
+  } else {
+    card.element.removeAttribute("data-active");
   }
   const severity = isInsufficient
     ? "info"
@@ -1643,10 +1790,8 @@ function renderLatencyChart() {
   let minValue = 0;
   let maxValue = 1;
   if (rttValues.length > 0) {
-    const minRtt = Math.min(...rttValues);
     const maxRtt = Math.max(...rttValues);
-    minValue = Math.max(0, minRtt * 0.9);
-    maxValue = Math.max(maxRtt * 1.1, minValue + 1);
+    maxValue = Math.max(maxRtt * 1.1, 1);
   }
 
   charts.latency.setOption({
@@ -1656,7 +1801,7 @@ function renderLatencyChart() {
 }
 
 function renderHeatmap() {
-  if (!HEATMAP_ENABLED || !charts.heatmap || !state.selectedTarget) {
+  if (!HEATMAP_ENABLED || !charts.heatmap || !state.selectedTarget || state.compactMode) {
     setChartEmptyState("heatmapChart", true);
     return;
   }
@@ -1911,6 +2056,10 @@ function renderTraceroute() {
     return;
   }
   refs.tracerouteTimeline.innerHTML = "";
+  if (state.compactMode) {
+    refs.tracerouteMeta.textContent = "Disponível no modo expandido";
+    return;
+  }
   const traceroute = state.traceroute;
   if (!traceroute || !Array.isArray(traceroute.hops) || traceroute.hops.length === 0) {
     const empty = document.createElement("div");
