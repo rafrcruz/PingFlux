@@ -275,6 +275,14 @@ function parseRttFromOutput(output) {
   return null;
 }
 
+function sanitizeRtt(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return null;
+  }
+  return num;
+}
+
 function runPing(target, timeoutMs, { signal } = {}) {
   return new Promise((resolve) => {
     if (signal?.aborted) {
@@ -448,13 +456,13 @@ async function executeProbe(target, method, settings, { signal } = {}) {
       });
       if (result.success) {
         sample.success = 1;
-        sample.rtt_ms = Number.isFinite(result.rtt) ? result.rtt : null;
+        sample.rtt_ms = sanitizeRtt(result.rtt);
       }
     } else {
       const result = await runPing(normalizedTarget, settings.timeoutMs, { signal });
       if (result.success) {
         sample.success = 1;
-        sample.rtt_ms = parseRttFromOutput(result.output);
+        sample.rtt_ms = sanitizeRtt(parseRttFromOutput(result.output));
       }
     }
   } catch (error) {

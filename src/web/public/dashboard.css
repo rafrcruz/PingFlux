@@ -479,7 +479,7 @@ body {
   border-color: rgba(227, 179, 65, 0.45);
 }
 
-.kpi-card.crit {
+.kpi-card.critical {
   border-color: rgba(248, 81, 73, 0.6);
   box-shadow: 0 0 0 1px rgba(248, 81, 73, 0.2), var(--shadow-sm);
 }
@@ -597,13 +597,13 @@ body {
 }
 
 .kpi-card.warn .trend-arrow.up,
-.kpi-card.crit .trend-arrow.up {
+.kpi-card.critical .trend-arrow.up {
   background: rgba(248, 81, 73, 0.18);
   color: var(--critical);
 }
 
 .kpi-card.warn .trend-arrow.down,
-.kpi-card.crit .trend-arrow.down {
+.kpi-card.critical .trend-arrow.down {
   background: rgba(63, 185, 80, 0.18);
   color: var(--positive);
 }
@@ -670,7 +670,7 @@ body {
   background: rgba(227, 179, 65, 0.1);
 }
 
-.network-status--crit {
+.network-status--critical {
   border-left-color: var(--critical);
   background: rgba(248, 81, 73, 0.12);
 }
@@ -818,7 +818,7 @@ body {
   background: rgba(227, 179, 65, 0.12);
 }
 
-.event-item.crit {
+.event-item.critical {
   border-color: rgba(248, 81, 73, 0.4);
   background: rgba(248, 81, 73, 0.14);
 }
