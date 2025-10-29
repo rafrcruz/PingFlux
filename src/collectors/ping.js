@@ -3,6 +3,11 @@ import net from "net";
 import { getConfig } from "../config/index.js";
 import { openDb, migrate } from "../storage/db.js";
 import * as logger from "../utils/logger.js";
+import {
+  ensureTarget as ensureWindowTarget,
+  recordPingSample as recordRealtimePingSample,
+  isEnabled as realtimeWindowsEnabled,
+} from "../runtime/windows.js";
 
 const DEFAULT_TARGETS = ["8.8.8.8"];
 const DEFAULT_INTERVAL_S = 60;
@@ -16,6 +21,23 @@ let migrationsEnsured = false;
 let activeLoopController = null;
 let currentPingProcess = null;
 const targetStates = new Map();
+
+// Realtime telemetry (in-memory) vs historical durability (SQLite) is split here.
+// The batch state accumulates raw samples before flushing them to the database.
+let insertManyStatement = null;
+const batchState = {
+  pending: [],
+  flushMs: 5000,
+  timer: null,
+  threshold: 100,
+  maxPending: 1000,
+  stats: {
+    ok: 0,
+    error: 0,
+    lastLogTs: Date.now(),
+  },
+  lastErrorTs: null,
+};
 
 function terminateChildProcess(child) {
   if (!child) {
@@ -64,6 +86,15 @@ function buildSettings() {
   const timeoutMs = Number.isFinite(pingConfig.timeoutMs)
     ? Math.max(1, Math.floor(pingConfig.timeoutMs))
     : DEFAULT_TIMEOUT_MS;
+  const jitterMs = Number.isFinite(pingConfig.jitterMs)
+    ? Math.max(0, Math.floor(pingConfig.jitterMs))
+    : 0;
+  const batchFlushMs = Number.isFinite(pingConfig.batchFlushMs)
+    ? Math.max(250, Math.floor(pingConfig.batchFlushMs))
+    : 5000;
+  const maxInMemoryPoints = Number.isFinite(pingConfig.maxInMemoryPoints)
+    ? Math.max(1, Math.floor(pingConfig.maxInMemoryPoints))
+    : 600;
   const methodPreference =
     typeof pingConfig.methodPreference === "string"
       ? pingConfig.methodPreference.trim().toLowerCase()
@@ -88,6 +119,9 @@ function buildSettings() {
     tcpPort,
     fallbackAfterFails,
     recoveryAfterOks,
+    jitterMs,
+    batchFlushMs,
+    maxInMemoryPoints,
   };
 }
 
@@ -97,6 +131,149 @@ export function getPingSettings() {
   }
 
   return cachedSettings;
+}
+
+function configureBatchSettings(settings, targetCount) {
+  const flushMs = Number.isFinite(settings?.batchFlushMs)
+    ? Math.max(250, Math.floor(settings.batchFlushMs))
+    : 5000;
+  batchState.flushMs = flushMs;
+
+  const derivedThreshold = Number.isFinite(targetCount)
+    ? Math.max(10, Math.floor(targetCount) * 5)
+    : 50;
+  batchState.threshold = Math.max(10, derivedThreshold);
+
+  const candidateMax = Number.isFinite(settings?.maxInMemoryPoints)
+    ? Math.max(settings.maxInMemoryPoints * 5, batchState.threshold * 2)
+    : batchState.threshold * 4;
+  batchState.maxPending = Math.max(candidateMax, 500);
+}
+
+function getInsertManyStatement() {
+  ensureDbReady();
+  if (insertManyStatement) {
+    return insertManyStatement;
+  }
+
+  const db = openDb();
+  const insert = db.prepare(
+    "INSERT INTO ping_sample (ts, target, method, rtt_ms, success) VALUES (@ts, @target, @method, @rtt_ms, @success)"
+  );
+
+  insertManyStatement = db.transaction((rows) => {
+    for (const row of rows) {
+      insert.run({
+        ts: row.ts,
+        target: row.target,
+        method: row.method,
+        rtt_ms: row.rtt_ms,
+        success: row.success ? 1 : 0,
+      });
+    }
+  });
+
+  return insertManyStatement;
+}
+
+function persistSamplesNow(samples) {
+  if (!Array.isArray(samples) || samples.length === 0) {
+    return true;
+  }
+
+  const insertMany = getInsertManyStatement();
+  insertMany(samples);
+  return true;
+}
+
+function maybeLogBatchStats() {
+  const now = Date.now();
+  if (now - batchState.stats.lastLogTs < 60_000) {
+    return;
+  }
+
+  const ok = batchState.stats.ok;
+  const error = batchState.stats.error;
+  batchState.stats.lastLogTs = now;
+  batchState.stats.ok = 0;
+  batchState.stats.error = 0;
+  logger.debug("ping", `batch flush counters ok=${ok} error=${error}`);
+}
+
+function flushPendingBatch({ force = false } = {}) {
+  if (!force && batchState.pending.length === 0) {
+    maybeLogBatchStats();
+    return true;
+  }
+
+  if (batchState.pending.length === 0) {
+    maybeLogBatchStats();
+    return true;
+  }
+
+  try {
+    persistSamplesNow(batchState.pending);
+    batchState.pending = [];
+    batchState.stats.ok += 1;
+    batchState.lastErrorTs = null;
+    maybeLogBatchStats();
+    return true;
+  } catch (error) {
+    batchState.stats.error += 1;
+    batchState.lastErrorTs = Date.now();
+    logger.error("ping", "Failed to flush ping samples batch", error);
+    if (batchState.pending.length > batchState.maxPending) {
+      const overflow = batchState.pending.length - batchState.maxPending;
+      batchState.pending.splice(0, overflow);
+      logger.warn(
+        "ping",
+        `Dropping ${overflow} pending ping samples to cap memory usage after flush failures. Remaining=${batchState.pending.length}`
+      );
+    }
+    maybeLogBatchStats();
+    return false;
+  }
+}
+
+function startFlushTimer(shouldStop) {
+  if (batchState.timer) {
+    return;
+  }
+  const delay = batchState.flushMs;
+  batchState.timer = setTimeout(() => {
+    batchState.timer = null;
+    if (typeof shouldStop === "function" && shouldStop()) {
+      return;
+    }
+    flushPendingBatch();
+    if (typeof shouldStop === "function" && shouldStop()) {
+      return;
+    }
+    startFlushTimer(shouldStop);
+  }, delay);
+  batchState.timer.unref?.();
+}
+
+function stopFlushTimer() {
+  if (batchState.timer) {
+    clearTimeout(batchState.timer);
+    batchState.timer = null;
+  }
+}
+
+function appendSampleToBatch(sample) {
+  batchState.pending.push(sample);
+  if (batchState.pending.length >= batchState.threshold) {
+    flushPendingBatch();
+  }
+  if (batchState.pending.length > batchState.maxPending && batchState.lastErrorTs) {
+    const overflow = batchState.pending.length - batchState.maxPending;
+    batchState.pending.splice(0, overflow);
+    logger.warn(
+      "ping",
+      `Dropping ${overflow} pending ping samples to respect maxPending=${batchState.maxPending}.`
+    );
+  }
 }
 
 function ensureDbReady() {
@@ -489,6 +666,18 @@ export async function measureOnce(target, { signal } = {}) {
     settings,
   });
 
+  if (realtimeWindowsEnabled()) {
+    ensureWindowTarget(trimmedTarget);
+    recordRealtimePingSample({
+      ts: sample.ts,
+      target: trimmedTarget,
+      success: sample.success === 1,
+      rtt_ms: sample.success === 1 && Number.isFinite(sample.rtt_ms)
+        ? sample.rtt_ms
+        : null,
+    });
+  }
+
   return sample;
 }
 
@@ -531,31 +720,36 @@ export async function measureCycle(targets, { signal } = {}) {
       settings,
     });
 
-    samples.push(sample);
+    const normalized = {
+      ts: sample.ts,
+      target: trimmedTarget,
+      method: sample.method,
+      rtt_ms: sample.success === 1 && Number.isFinite(sample.rtt_ms) ? sample.rtt_ms : null,
+      success: sample.success === 1 ? 1 : 0,
+    };
+
+    samples.push(normalized);
+
+    if (realtimeWindowsEnabled()) {
+      ensureWindowTarget(trimmedTarget);
+      recordRealtimePingSample({
+        ts: normalized.ts,
+        target: trimmedTarget,
+        success: normalized.success === 1,
+        rtt_ms: normalized.success === 1 ? normalized.rtt_ms : null,
+      });
+    }
   }
 
   if (samples.length === 0) {
     return samples;
   }
 
-  const db = openDb();
-  const insert = db.prepare(
-    "INSERT INTO ping_sample (ts, target, method, rtt_ms, success) VALUES (@ts, @target, @method, @rtt_ms, @success)"
-  );
-
-  const insertMany = db.transaction((rows) => {
-    for (const row of rows) {
-      insert.run({
-        ts: row.ts,
-        target: row.target,
-        method: row.method,
-        rtt_ms: row.rtt_ms,
-        success: row.success ? 1 : 0,
-      });
-    }
-  });
-
-  insertMany(samples);
+  try {
+    persistSamplesNow(samples);
+  } catch (error) {
+    logger.error("ping", "Failed to persist ping samples from manual cycle", error);
+  }
 
   return samples;
 }
@@ -563,8 +757,18 @@ export async function measureCycle(targets, { signal } = {}) {
 function createLoopController({ signal } = {}) {
   const settings = getPingSettings();
   const targets = settings.targets;
+
+  configureBatchSettings(settings, targets.length);
+
   logger.info("ping", `Starting ping loop for: ${targets.length ? targets.join(", ") : "(none)"}`);
-  logger.info("ping", `Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
+  const intervalSeconds = settings.intervalMs / 1000;
+  const intervalText = Number.isInteger(intervalSeconds)
+    ? `${intervalSeconds}`
+    : intervalSeconds.toFixed(3).replace(/\.0+$/, "");
+  logger.info(
+    "ping",
+    `interval=${intervalText}s (±${settings.jitterMs}ms jitter), timeout=${settings.timeoutMs}ms`
+  );
   if (settings.methodPreference === "auto") {
     logger.info(
       "ping",
@@ -577,11 +781,114 @@ function createLoopController({ signal } = {}) {
     );
   }
 
+  if (realtimeWindowsEnabled()) {
+    for (const target of targets) {
+      ensureWindowTarget(target);
+    }
+  }
+
   let stopRequested = false;
-  let pendingSleepResolve = null;
-  let pendingSleepTimer = null;
+  let waitTimer = null;
+  let waitResolve = null;
+
   const loopAbortController = new AbortController();
   const loopSignal = loopAbortController.signal;
+
+  const shouldStop = () => stopRequested || loopSignal.aborted;
+
+  const clearWaitTimer = () => {
+    if (waitTimer !== null) {
+      clearTimeout(waitTimer);
+      waitTimer = null;
+    }
+    if (typeof waitResolve === "function") {
+      const resolve = waitResolve;
+      waitResolve = null;
+      resolve();
+    }
+  };
+
+  const waitForNextInterval = () => {
+    if (shouldStop()) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      waitResolve = resolve;
+      const jitter = settings.jitterMs > 0
+        ? Math.round((Math.random() * 2 - 1) * settings.jitterMs)
+        : 0;
+      const delay = Math.max(0, settings.intervalMs + jitter);
+      waitTimer = setTimeout(() => {
+        waitTimer = null;
+        waitResolve = null;
+        resolve();
+      }, delay);
+      waitTimer.unref?.();
+    });
+  };
+
+  const runCycle = async () => {
+    for (const target of targets) {
+      if (shouldStop()) {
+        break;
+      }
+
+      const trimmedTarget = String(target ?? "").trim();
+      if (!trimmedTarget) {
+        continue;
+      }
+
+      const { state, method } = resolveMethodForTarget(trimmedTarget, settings);
+      let sample;
+      try {
+        sample = await executeProbe(trimmedTarget, method, settings, { signal: loopSignal });
+      } catch (error) {
+        logger.error("ping", `Cycle probe error for ${trimmedTarget}`, error);
+        sample = {
+          ts: Date.now(),
+          target: trimmedTarget,
+          method,
+          rtt_ms: null,
+          success: 0,
+        };
+      }
+
+      updateStateAfterResult({
+        state,
+        target: trimmedTarget,
+        method: sample.method,
+        success: sample.success === 1,
+        ts: sample.ts,
+        settings,
+      });
+
+      const normalized = {
+        ts: sample.ts,
+        target: trimmedTarget,
+        method: sample.method,
+        rtt_ms: sample.success === 1 && Number.isFinite(sample.rtt_ms) ? sample.rtt_ms : null,
+        success: sample.success === 1 ? 1 : 0,
+      };
+
+      if (realtimeWindowsEnabled()) {
+        ensureWindowTarget(trimmedTarget);
+        recordRealtimePingSample({
+          ts: normalized.ts,
+          target: trimmedTarget,
+          success: normalized.success === 1,
+          rtt_ms: normalized.success === 1 ? normalized.rtt_ms : null,
+        });
+      }
+
+      appendSampleToBatch(normalized);
+    }
+  };
+
+  const abortHandler = () => {
+    logger.warn("ping", "Abort signal received, stopping loop...");
+    requestStop();
+  };
 
   const requestStop = () => {
     if (!stopRequested) {
@@ -589,29 +896,17 @@ function createLoopController({ signal } = {}) {
       stopRequested = true;
     }
 
-    if (pendingSleepTimer !== null) {
-      clearTimeout(pendingSleepTimer);
-      pendingSleepTimer = null;
-    }
-
-    if (typeof pendingSleepResolve === "function") {
-      const resolve = pendingSleepResolve;
-      pendingSleepResolve = null;
-      resolve();
-    }
+    clearWaitTimer();
 
     if (currentPingProcess) {
       terminateChildProcess(currentPingProcess);
     }
 
-    if (!loopAbortController.signal.aborted) {
+    if (!loopSignal.aborted) {
       loopAbortController.abort();
     }
-  };
 
-  const abortHandler = () => {
-    logger.warn("ping", "Abort signal received, stopping loop...");
-    requestStop();
+    flushPendingBatch({ force: true });
   };
 
   if (signal) {
@@ -624,41 +919,21 @@ function createLoopController({ signal } = {}) {
 
   const promise = (async () => {
     try {
-      while (!stopRequested) {
-        const cycleStart = Date.now();
-        try {
-          const samples = await measureCycle(targets, { signal: loopSignal });
-          logger.info(
-            "ping",
-            `Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
-          );
-        } catch (error) {
-          logger.error("ping", "Cycle error", error);
-        }
-
-        if (stopRequested) {
+      startFlushTimer(shouldStop);
+      while (!shouldStop()) {
+        await runCycle();
+        if (shouldStop()) {
           break;
         }
-
-        const elapsed = Date.now() - cycleStart;
-        const delay = Math.max(settings.intervalMs - elapsed, 0);
-        if (delay > 0 && !stopRequested) {
-          await new Promise((resolve) => {
-            pendingSleepResolve = resolve;
-            pendingSleepTimer = setTimeout(() => {
-              pendingSleepTimer = null;
-              pendingSleepResolve = null;
-              resolve();
-            }, delay);
-          });
-        }
+        await waitForNextInterval();
       }
     } finally {
-      if (pendingSleepTimer !== null) {
-        clearTimeout(pendingSleepTimer);
+      clearWaitTimer();
+      stopFlushTimer();
+      flushPendingBatch({ force: true });
+      if (signal) {
+        signal.removeEventListener("abort", abortHandler);
       }
-      pendingSleepTimer = null;
-      pendingSleepResolve = null;
       logger.info("ping", "Loop stopped.");
     }
   })();

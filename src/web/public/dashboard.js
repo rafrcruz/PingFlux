@@ -36,7 +36,7 @@ const EVENTS_LIMIT = 50;
 
 const RANGE_OPTIONS = [1, 5, 15, 60];
 const WINDOW_OPTION_MAP = new Map(
-  RANGE_OPTIONS.map((minutes) => [minutes, minutes === 60 ? "win60m" : `win${minutes}m`])
+  RANGE_OPTIONS.map((minutes) => [minutes, minutes === 60 ? "60m" : `${minutes}m`])
 );
 const MAX_RANGE_MINUTES = RANGE_OPTIONS.reduce((max, value) => (value > max ? value : max), 60);
 const HISTORY_LIMIT_MS = MAX_RANGE_MINUTES * 60 * 1000;
@@ -51,7 +51,7 @@ const initialViewportWidth =
 
 function getWindowKeyFromMinutes(minutes) {
   const normalized = Number(minutes);
-  return WINDOW_OPTION_MAP.get(normalized) ?? "win1m";
+  return WINDOW_OPTION_MAP.get(normalized) ?? "1m";
 }
 
 function getRangeParamFromMinutes(minutes) {
@@ -72,19 +72,19 @@ function formatWindowLabel(minutes) {
 
 function getWindowKeyFromRange(range) {
   if (typeof range !== "string") {
-    return "win1m";
+    return "1m";
   }
   const normalized = range.trim().toLowerCase();
   if (normalized === "60m" || normalized === "1h") {
-    return "win60m";
+    return "60m";
   }
   if (normalized === "15m") {
-    return "win15m";
+    return "15m";
   }
   if (normalized === "5m") {
-    return "win5m";
+    return "5m";
   }
-  return "win1m";
+  return "1m";
 }
 
 const severityRank = { info: 0, warn: 1, critical: 2 };
@@ -1038,7 +1038,11 @@ function updateTargetIndicators(target, metrics) {
   const ageValue = Number(metrics?.age_ms);
   const ageMs = Number.isFinite(ageValue) && ageValue >= 0 ? ageValue : null;
   const fresh = metrics?.fresh === undefined ? null : Boolean(metrics.fresh);
-  const modeRaw = typeof metrics?.pingMode === "string" ? metrics.pingMode.trim() : "";
+  const modeRaw = typeof metrics?.mode === "string"
+    ? metrics.mode.trim()
+    : typeof metrics?.pingMode === "string"
+      ? metrics.pingMode.trim()
+      : "";
   const pingMode = modeRaw ? modeRaw.toUpperCase() : null;
 
   state.targetIndicators.set(target, {
@@ -1116,19 +1120,40 @@ function ingestPingMetrics(target, metrics, ts) {
   });
   state.windowSummaries.set(target, summaryMap);
 
-  const lastSample = metrics?.lastSample;
-  if (lastSample) {
-    const sampleTs = Number(lastSample.ts ?? ts);
-    if (Number.isFinite(sampleTs)) {
-      const success = lastSample.up === 1 || lastSample.up === true || Number(lastSample.up) === 1;
-      const rttValue = normalize(lastSample.rtt_ms);
-      const sample = { ts: sampleTs, success, rtt: success ? rttValue : null };
-      const existing = state.pingSamples.get(target) ?? [];
-      const latest = state.latestSampleTs.get(target) ?? -Infinity;
-      if (sampleTs > latest) {
-        const merged = mergeSampleSeries(existing, [sample]);
-        state.pingSamples.set(target, merged);
-        state.latestSampleTs.set(target, sampleTs);
+  const recentEntries = Array.isArray(metrics?.recent)
+    ? metrics.recent
+        .map((item) => {
+          const tsValue = Number(item?.ts);
+          if (!Number.isFinite(tsValue)) {
+            return null;
+          }
+          const success = item?.success === true || item?.success === 1 || item?.success === "1";
+          const rttValue = normalize(item?.rtt_ms);
+          return { ts: tsValue, success, rtt: success ? rttValue : null };
+        })
+        .filter(Boolean)
+    : [];
+
+  if (recentEntries.length > 0) {
+    const existing = state.pingSamples.get(target) ?? [];
+    const merged = mergeSampleSeries(existing, recentEntries);
+    state.pingSamples.set(target, merged);
+    state.latestSampleTs.set(target, merged.length ? merged[merged.length - 1].ts : null);
+  } else {
+    const lastSample = metrics?.lastSample;
+    if (lastSample) {
+      const sampleTs = Number(lastSample.ts ?? ts);
+      if (Number.isFinite(sampleTs)) {
+        const success = lastSample.up === 1 || lastSample.up === true || Number(lastSample.up) === 1;
+        const rttValue = normalize(lastSample.rtt_ms);
+        const sample = { ts: sampleTs, success, rtt: success ? rttValue : null };
+        const existing = state.pingSamples.get(target) ?? [];
+        const latest = state.latestSampleTs.get(target) ?? -Infinity;
+        if (sampleTs > latest) {
+          const merged = mergeSampleSeries(existing, [sample]);
+          state.pingSamples.set(target, merged);
+          state.latestSampleTs.set(target, sampleTs);
+        }
       }
     }
   }
@@ -1165,13 +1190,13 @@ function resolveDnsValueForWindow(windowKey) {
     return null;
   }
   switch (windowKey) {
-    case "win5m":
+    case "5m":
       return normalize(stats.win5m_avg_ms);
-    case "win15m":
+    case "15m":
       return normalize(stats.win15m_avg_ms);
-    case "win60m":
+    case "60m":
       return normalize(stats.win60m_avg_ms);
-    case "win1m":
+    case "1m":
     default:
       return normalize(stats.win1m_avg_ms);
   }
@@ -1367,18 +1392,29 @@ function applyCurrentWindowSummary() {
 }
 
 function buildSummaryFromMetrics(metrics, key) {
-  if (!metrics || !metrics[key]) {
+  if (!metrics || !metrics.windows) {
     return null;
   }
-  const entry = metrics[key];
+  const entry = metrics.windows[key];
+  if (!entry) {
+    return {
+      win_p95_ms: null,
+      win_p50_ms: null,
+      win_avg_ms: null,
+      win_loss_pct: null,
+      win_availability_pct: null,
+      win_samples: 0,
+      status: "insufficient",
+    };
+  }
   return {
     win_p95_ms: normalize(entry.p95_ms),
     win_p50_ms: normalize(entry.p50_ms),
     win_avg_ms: normalize(entry.avg_ms),
     win_loss_pct: normalize(entry.loss_pct),
-    win_availability_pct: normalize(entry.availability_pct),
-    win_samples: Number(entry.samples) || 0,
-    status: typeof entry.status === "string" ? entry.status : null,
+    win_availability_pct: normalize(entry.disponibilidade_pct ?? entry.availability_pct),
+    win_samples: Number(entry.count ?? entry.samples) || 0,
+    status: typeof entry.status === "string" ? entry.status : Number(entry.count ?? entry.samples) > 0 ? "ok" : "insufficient",
   };
 }
 

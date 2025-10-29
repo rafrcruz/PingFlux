@@ -14,11 +14,20 @@ const DEFAULTS = Object.freeze({
   PING_TARGETS: "3.174.59.117,8.8.8.8,1.1.1.1",
   PINF_TARGET_DEFAULT: "",
   PING_INTERVAL_S: "60",
+  PING_INTERVAL_MS: "",
+  PING_JITTER_MS: "150",
   PING_TIMEOUT_MS: "3000",
+  PING_BATCH_FLUSH_MS: "5000",
+  PING_MAX_INMEM_POINTS: "600",
   PING_METHOD: "auto",
   PING_TCP_PORT: "443",
   PING_FALLBACK_AFTER_FAILS: "3",
   PING_RECOVERY_AFTER_OKS: "2",
+  WINDOWS_ENABLED: "true",
+  WINDOW_1M_SECONDS: "60",
+  WINDOW_5M_SECONDS: "300",
+  WINDOW_15M_SECONDS: "900",
+  WINDOW_60M_SECONDS: "3600",
   DNS_HOSTNAMES: "google.com",
   DNS_INTERVAL_S: "60",
   DNS_TIMEOUT_MS: "3000",
@@ -109,6 +118,11 @@ function toInteger(value, fallback) {
 function toPositiveInteger(value, fallback) {
   const parsed = toInteger(value, fallback);
   return parsed > 0 ? parsed : fallback;
+}
+
+function toNonNegativeInteger(value, fallback) {
+  const parsed = toInteger(value, fallback);
+  return parsed >= 0 ? parsed : fallback;
 }
 
 function toNumber(value, fallback) {
@@ -225,9 +239,21 @@ export function getConfig() {
       Number(resolveVar("PING_INTERVAL_S", fileVariables) ?? DEFAULTS.PING_INTERVAL_S) * 1000,
     Number(DEFAULTS.PING_INTERVAL_S) * 1000
   );
+  const pingJitterMs = toNonNegativeInteger(
+    resolveVar("PING_JITTER_MS", fileVariables),
+    Number(DEFAULTS.PING_JITTER_MS)
+  );
   const pingTimeoutMs = toPositiveInteger(
     resolveVar("PING_TIMEOUT_MS", fileVariables),
     Number(DEFAULTS.PING_TIMEOUT_MS)
+  );
+  const pingBatchFlushMs = toPositiveInteger(
+    resolveVar("PING_BATCH_FLUSH_MS", fileVariables),
+    Number(DEFAULTS.PING_BATCH_FLUSH_MS)
+  );
+  const pingMaxInMemPoints = toPositiveInteger(
+    resolveVar("PING_MAX_INMEM_POINTS", fileVariables),
+    Number(DEFAULTS.PING_MAX_INMEM_POINTS)
   );
   const pingMethod = toMethodPreference(
     process.env.PING_METHOD ??
@@ -301,6 +327,27 @@ export function getConfig() {
     Number(DEFAULTS.AGG_MAX_BATCH)
   );
 
+  const windowsEnabled = toBoolean(
+    resolveVar("WINDOWS_ENABLED", fileVariables),
+    toBoolean(DEFAULTS.WINDOWS_ENABLED, true)
+  );
+  const window1mSeconds = toPositiveInteger(
+    resolveVar("WINDOW_1M_SECONDS", fileVariables),
+    Number(DEFAULTS.WINDOW_1M_SECONDS)
+  );
+  const window5mSeconds = toPositiveInteger(
+    resolveVar("WINDOW_5M_SECONDS", fileVariables),
+    Number(DEFAULTS.WINDOW_5M_SECONDS)
+  );
+  const window15mSeconds = toPositiveInteger(
+    resolveVar("WINDOW_15M_SECONDS", fileVariables),
+    Number(DEFAULTS.WINDOW_15M_SECONDS)
+  );
+  const window60mSeconds = toPositiveInteger(
+    resolveVar("WINDOW_60M_SECONDS", fileVariables),
+    Number(DEFAULTS.WINDOW_60M_SECONDS)
+  );
+
   const rawAlertRtt = resolveOptionalVar("ALERT_RTT_MS", fileVariables);
   const rawLegacyAlertRtt = resolveOptionalVar("ALERT_P95_MS", fileVariables);
   const alertRttMs = toNumber(
@@ -336,6 +383,9 @@ export function getConfig() {
       targets: pingTargets,
       intervalMs: pingIntervalMs,
       timeoutMs: pingTimeoutMs,
+      jitterMs: pingJitterMs,
+      batchFlushMs: pingBatchFlushMs,
+      maxInMemoryPoints: pingMaxInMemPoints,
       methodPreference: pingMethod,
       tcpPort: pingTcpPort,
       fallbackAfterFails: pingFallbackAfterFails,
@@ -360,6 +410,15 @@ export function getConfig() {
       intervalMs: aggIntervalMs,
       catchupMinutes: aggCatchupMin,
       maxBatch: aggMaxBatch,
+    },
+    runtimeWindows: {
+      enabled: windowsEnabled,
+      durations: {
+        "1m": window1mSeconds * 1000,
+        "5m": window5mSeconds * 1000,
+        "15m": window15mSeconds * 1000,
+        "60m": window60mSeconds * 1000,
+      },
     },
     ui: {
       ewmaAlpha: toClampedAlpha(
