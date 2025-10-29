@@ -102,6 +102,9 @@ const refs = {
   tracerouteTimeline: document.getElementById("tracerouteTimeline"),
   tracerouteMeta: document.getElementById("tracerouteMeta"),
   tracerouteTrigger: document.getElementById("tracerouteTrigger"),
+  pageShell: document.querySelector(".page-shell"),
+  networkStatusBar: document.getElementById("networkStatusBar"),
+  networkStatusText: document.getElementById("networkStatusText"),
 };
 
 const kpiCards = Array.from(document.querySelectorAll(".kpi-card")).map((card) => {
@@ -149,6 +152,7 @@ function init() {
   }
   updatePauseState();
   scheduleRender();
+  updateNetworkStatus();
   startEventsRefreshTimer();
 }
 
@@ -795,10 +799,13 @@ function updateTargetStatusDisplay() {
       refs.targetMode.textContent = meta.pingMode;
       refs.targetMode.setAttribute("title", "Modo de medição atual");
       refs.targetMode.setAttribute("aria-label", `Modo de medição atual: ${meta.pingMode}`);
+      const isTcp = meta.pingMode.toUpperCase() === "TCP";
+      refs.targetMode.classList.toggle("badge-mode--tcp", isTcp);
     } else {
       refs.targetMode.hidden = true;
       refs.targetMode.removeAttribute("title");
       refs.targetMode.removeAttribute("aria-label");
+      refs.targetMode.classList.remove("badge-mode--tcp");
     }
   }
 
@@ -806,7 +813,7 @@ function updateTargetStatusDisplay() {
     if (meta && meta.fresh === false && meta.ageMs != null) {
       const seconds = Math.max(1, Math.floor(meta.ageMs / 1000));
       refs.staleBadge.hidden = false;
-      refs.staleBadge.textContent = "Desatualizado";
+      refs.staleBadge.textContent = "⏱ Sem dados recentes";
       refs.staleBadge.setAttribute("title", `Sem novas amostras há ${seconds}s.`);
       refs.staleBadge.setAttribute("aria-label", `Sem novas amostras há ${seconds} segundos`);
     } else {
@@ -815,6 +822,13 @@ function updateTargetStatusDisplay() {
       refs.staleBadge.removeAttribute("aria-label");
     }
   }
+
+  if (refs.pageShell) {
+    const isStale = Boolean(meta && meta.fresh === false);
+    refs.pageShell.classList.toggle("is-stale", isStale);
+  }
+
+  updateNetworkStatus();
 }
 
 function ingestPingMetrics(target, metrics, ts) {
@@ -937,6 +951,7 @@ function updateKpis(metrics, latestEntry) {
     subText: `5m: ${fmtPct(availability5m)}`,
   });
   updateGauge(availability);
+  updateNetworkStatus(latestEntry);
 }
 
 function getAvailabilityColor(value) {
@@ -1001,6 +1016,64 @@ function updateLatencySeriesVisibility() {
   });
 }
 
+function renderKpiValue(element, valueText) {
+  if (!element) {
+    return;
+  }
+  if (!valueText || valueText === "—") {
+    element.textContent = "—";
+    return;
+  }
+  const normalized = String(valueText).trim();
+  const match = normalized.match(/^([+-]?[0-9.,]+)(?:\s?([a-z%°µ]+))?$/i);
+  if (!match) {
+    element.textContent = normalized;
+    return;
+  }
+  const [, numberPart, unitPart] = match;
+  const numberSpan = `<span class="value-number">${numberPart}</span>`;
+  const unitSpan = unitPart ? `<span class="value-unit">${unitPart}</span>` : "";
+  element.innerHTML = `${numberSpan}${unitSpan}`;
+}
+
+function updateNetworkStatus(latestEntry) {
+  if (!refs.networkStatusBar || !refs.networkStatusText) {
+    return;
+  }
+  let entry = latestEntry;
+  if (!entry && state.selectedTarget) {
+    const series = state.pingSeries.get(state.selectedTarget);
+    if (Array.isArray(series) && series.length > 0) {
+      entry = series[series.length - 1];
+    }
+  }
+  const hasLatency = Number.isFinite(entry?.p95);
+  const hasLoss = Number.isFinite(entry?.loss);
+  if (!hasLatency && !hasLoss) {
+    refs.networkStatusBar.className = "network-status network-status--idle";
+    refs.networkStatusText.textContent = "Aguardando dados de RTT…";
+    return;
+  }
+  const p95Severity = state.severities.get("ping-p95") || "ok";
+  const lossSeverity = state.severities.get("ping-loss") || "ok";
+  const p95Rank = severityRank[p95Severity] ?? 0;
+  const lossRank = severityRank[lossSeverity] ?? 0;
+  const worstSeverity = lossRank > p95Rank ? lossSeverity : p95Severity;
+  const worstRank = severityRank[worstSeverity] ?? 0;
+  let label = "Rede estável";
+  if (worstRank > severityRank.ok) {
+    label = lossRank > p95Rank ? "Perda de pacotes elevada" : "Latência alta";
+  }
+  let statusClass = "network-status--ok";
+  if (worstRank >= severityRank.crit) {
+    statusClass = "network-status--crit";
+  } else if (worstRank >= severityRank.warn) {
+    statusClass = "network-status--warn";
+  }
+  refs.networkStatusBar.className = `network-status ${statusClass}`;
+  refs.networkStatusText.textContent = label;
+}
+
 function updateKpi(key, value, options = {}) {
   const card = kpiCards.find((item) => item.key === key);
   if (!card) {
@@ -1008,11 +1081,13 @@ function updateKpi(key, value, options = {}) {
   }
   const formatter = typeof options.formatter === "function" ? options.formatter : fmtMs;
   const valueText = formatter(value);
-  card.valueEl.textContent = valueText;
+  renderKpiValue(card.valueEl, valueText);
   if (valueText === "—") {
     card.valueEl.setAttribute("title", STRINGS.noData || "Sem dados suficientes no período.");
+    card.element.setAttribute("data-loading", "true");
   } else {
     card.valueEl.removeAttribute("title");
+    card.element.removeAttribute("data-loading");
   }
   if (card.subEl && options.subText) {
     card.subEl.textContent = options.subText;
@@ -1132,6 +1207,7 @@ function updateEventsForMetric(key, value, threshold, label, options = {}) {
   const higherIsBad = options.higherIsBad !== false;
   const severity = determineSeverity(value, threshold, higherIsBad);
   const prev = state.severities.get(key) || "ok";
+  state.severities.set(key, severity);
   if (severityRank[severity] > severityRank[prev]) {
     const formatter = typeof options.formatter === "function" ? options.formatter : fmtMs;
     const eventKey = options.eventKey || `${key}_${severity}`;
