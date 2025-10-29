@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS ping_window_1m (
   sent INTEGER NOT NULL,
   received INTEGER NOT NULL,
   loss_pct REAL NOT NULL,
+  avg_ms REAL,
   p50_ms REAL,
   p95_ms REAL,
   stdev_ms REAL,
@@ -114,6 +115,21 @@ export function migrate() {
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
+  }
+
+  try {
+    const columns = db.prepare("PRAGMA table_info(ping_window_1m)").all();
+    const hasAvgColumn = Array.isArray(columns)
+      ? columns.some((column) => column?.name === "avg_ms")
+      : false;
+    if (!hasAvgColumn) {
+      db.exec("ALTER TABLE ping_window_1m ADD COLUMN avg_ms REAL");
+    }
+  } catch (error) {
+    // If the table does not exist yet or the column already exists, ignore.
+    if (!/duplicate column name/i.test(String(error?.message ?? ""))) {
+      throw error;
+    }
   }
 
   return resolveDbPath();

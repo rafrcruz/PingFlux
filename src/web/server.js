@@ -1,5 +1,6 @@
-﻿import http from "http";
+import http from "http";
 import { runTraceroute } from "../collectors/traceroute.js";
+import { createLiveMetricsBroadcaster } from "./live-metrics.js";
 
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
@@ -974,15 +975,15 @@ function resolveRangeWindow(rawRange) {
   return { fromMs, toMs: nowMs };
 }
 
-function createRequestHandler(db, appConfig) {
+function createRequestHandler(db, appConfig, options = {}) {
   const hasDb = db && typeof db.prepare === "function";
   const statements = hasDb
     ? {
         pingWindowAll: db.prepare(
-          "SELECT ts_min, target, sent, received, loss_pct, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? ORDER BY target ASC, ts_min ASC"
+          "SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? ORDER BY target ASC, ts_min ASC"
         ),
         pingWindowByTarget: db.prepare(
-          "SELECT ts_min, target, sent, received, loss_pct, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? AND target = ? ORDER BY ts_min ASC"
+          "SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? AND target = ? ORDER BY ts_min ASC"
         ),
         dnsSamplesAll: db.prepare(
           "SELECT ts, hostname, resolver, lookup_ms, success FROM dns_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
@@ -1002,7 +1003,18 @@ function createRequestHandler(db, appConfig) {
       }
     : null;
 
-  return async (req, res) => {
+  const liveMetrics = hasDb
+    ? createLiveMetricsBroadcaster({
+        db,
+        config: {
+          pushIntervalMs: options?.live?.pushIntervalMs,
+          useWindows: options?.live?.useWindows,
+          pingTargets: options?.live?.pingTargets,
+        },
+      })
+    : null;
+
+  const handler = async (req, res) => {
     const { method, url } = req;
     if (!method || !url) {
       sendText(res, 400, "Bad request");
@@ -1026,6 +1038,15 @@ function createRequestHandler(db, appConfig) {
       } catch (error) {
         sendJson(res, 500, { status: "error", message: error?.message ?? "Unknown" });
       }
+      return;
+    }
+
+    if (method === "GET" && parsedUrl.pathname === "/live/metrics") {
+      if (!liveMetrics) {
+        sendJson(res, 503, { error: "Live metrics unavailable" });
+        return;
+      }
+      liveMetrics.handleRequest(req, res);
       return;
     }
 
@@ -1206,6 +1227,8 @@ function createRequestHandler(db, appConfig) {
 
     sendText(res, 404, "Not found");
   };
+
+  return { handler, liveMetrics };
 }
 
 export async function startServer({
@@ -1234,8 +1257,16 @@ export async function startServer({
       : null,
   };
 
+  const { handler, liveMetrics } = createRequestHandler(db, appConfig, {
+    live: {
+      pushIntervalMs: config?.liveMetrics?.pushIntervalMs,
+      useWindows: config?.liveMetrics?.useWindows,
+      pingTargets: config?.ping?.targets,
+    },
+  });
+
   return new Promise((resolve, reject) => {
-    const server = http.createServer(createRequestHandler(db, appConfig));
+    const server = http.createServer(handler);
     const sockets = new Set();
     let closeRequested = false;
     let signalHandler = null;
@@ -1280,6 +1311,12 @@ export async function startServer({
 
         return new Promise((resolveClose, rejectClose) => {
           let completed = false;
+
+          try {
+            liveMetrics?.close();
+          } catch (error) {
+            console.error("[web] Failed to stop live metrics:", error);
+          }
 
           const timeout = setTimeout(() => {
             if (completed) {
@@ -1330,6 +1367,11 @@ export async function startServer({
           exportedClose().catch(() => {});
         } else {
           closeRequested = true;
+          try {
+            liveMetrics?.close();
+          } catch (error) {
+            console.error("[web] Failed to stop live metrics during abort:", error);
+          }
           server.close(() => {});
           finishReject(new Error("Server shutdown requested before start"));
         }
@@ -1346,6 +1388,11 @@ export async function startServer({
     server.once("close", () => {
       if (signal && signalHandler) {
         signal.removeEventListener("abort", signalHandler);
+      }
+      try {
+        liveMetrics?.close();
+      } catch (error) {
+        console.error("[web] Failed to stop live metrics after close:", error);
       }
     });
   });
