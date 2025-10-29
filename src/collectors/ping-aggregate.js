@@ -60,6 +60,7 @@ function buildUpsertStatement(db) {
       sent,
       received,
       loss_pct,
+      avg_ms,
       p50_ms,
       p95_ms,
       stdev_ms
@@ -69,6 +70,7 @@ function buildUpsertStatement(db) {
       @sent,
       @received,
       @loss_pct,
+      @avg_ms,
       @p50_ms,
       @p95_ms,
       @stdev_ms
@@ -77,6 +79,7 @@ function buildUpsertStatement(db) {
       sent = excluded.sent,
       received = excluded.received,
       loss_pct = excluded.loss_pct,
+      avg_ms = excluded.avg_ms,
       p50_ms = excluded.p50_ms,
       p95_ms = excluded.p95_ms,
       stdev_ms = excluded.stdev_ms
@@ -138,6 +141,9 @@ function finalizeBuckets(buckets) {
     const lossPct =
       bucket.sent > 0 ? ((bucket.sent - bucket.received) / bucket.sent) * 100 : 0;
     const sortedLatencies = bucket.latencies.slice().sort((a, b) => a - b);
+    const avg = bucket.latencies.length
+      ? bucket.latencies.reduce((sum, value) => sum + value, 0) / bucket.latencies.length
+      : null;
     const p50 = computePercentile(sortedLatencies, 0.5);
     const p95 = computePercentile(sortedLatencies, 0.95);
     const stdev = computeStandardDeviation(sortedLatencies);
@@ -148,6 +154,7 @@ function finalizeBuckets(buckets) {
       sent: bucket.sent,
       received: bucket.received,
       loss_pct: lossPct,
+      avg_ms: avg,
       p50_ms: p50,
       p95_ms: p95,
       stdev_ms: stdev,

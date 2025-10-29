@@ -24,6 +24,8 @@ const DEFAULTS = Object.freeze({
   ALERT_P95_MS: "200",
   ALERT_LOSS_PCT: "1.0",
   ALERT_MIN_POINTS: "10",
+  LIVE_PUSH_INTERVAL_MS: "2000",
+  LIVE_USE_WINDOWS: "true",
 });
 
 const QUOTE_TRIM_PATTERN = /^['"]?(.*?)['"]?$/;
@@ -182,6 +184,15 @@ export function getConfig() {
     Number(DEFAULTS.HTTP_TIMEOUT_MS)
   );
 
+  const livePushIntervalMs = toPositiveInteger(
+    resolveVar("LIVE_PUSH_INTERVAL_MS", fileVariables),
+    Number(DEFAULTS.LIVE_PUSH_INTERVAL_MS)
+  );
+  const liveUseWindows = toBoolean(
+    resolveVar("LIVE_USE_WINDOWS", fileVariables),
+    toBoolean(DEFAULTS.LIVE_USE_WINDOWS, true)
+  );
+
   const alertP95Ms = toNumber(
     resolveVar("ALERT_P95_MS", fileVariables),
     Number(DEFAULTS.ALERT_P95_MS)
@@ -221,6 +232,10 @@ export function getConfig() {
       urls: httpUrls,
       intervalS: httpIntervalS,
       timeoutMs: httpTimeoutMs,
+    },
+    liveMetrics: {
+      pushIntervalMs: livePushIntervalMs,
+      useWindows: liveUseWindows,
     },
     alerts: {
       p95Ms: alertP95Ms,
