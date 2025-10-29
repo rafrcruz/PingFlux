@@ -59,50 +59,55 @@ export function renderIndexPage(uiConfig, options = {}) {
   </head>
   <body>
     <div class="page-shell">
-      <header class="app-header" role="banner">
-        <div class="brand" aria-label="PingFlux">
-          <span class="brand-icon" aria-hidden="true">
-            <svg viewBox="0 0 64 64" focusable="false">
-              <path d="M8 34c6 0 6-18 12-18s6 32 12 32 6-44 12-44 6 38 12 38" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-          </span>
-          <div class="brand-text">
-            <span class="brand-title">PingFlux</span>
-            <span class="brand-subtitle">Live Network Intelligence</span>
+      <header class="app-hero" role="banner">
+        <!-- Hero reorganizado para destacar título e estado em tempo real -->
+        <div class="hero-top">
+          <div class="brand" aria-label="PingFlux">
+            <span class="brand-icon" aria-hidden="true">
+              <svg viewBox="0 0 64 64" focusable="false">
+                <path d="M8 34c6 0 6-18 12-18s6 32 12 32 6-44 12-44 6 38 12 38" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </span>
+            <div class="brand-text">
+              <h1 class="brand-title">PingFlux – Live Network Intelligence</h1>
+              <p class="brand-subtitle">Observabilidade contínua de latência, perda e disponibilidade.</p>
+            </div>
+          </div>
+          <div class="hero-actions">
+            <button id="themeToggle" class="toggle-theme" aria-label="Alternar tema" aria-live="polite">
+              <span class="icon moon" aria-hidden="true"></span>
+              <span class="icon sun" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
-        <div class="header-actions">
-          <button id="themeToggle" class="toggle-theme" aria-label="Alternar tema" aria-live="polite">
-            <span class="icon moon" aria-hidden="true"></span>
-            <span class="icon sun" aria-hidden="true"></span>
-          </button>
+        <div class="hero-meta">
           <div class="live-indicator" role="status" aria-live="polite">
             <span id="connectionDot" class="status-dot status-dot--connecting" aria-hidden="true"></span>
             <span id="connectionText">Conectando…</span>
           </div>
           <time id="lastUpdate" class="last-update" datetime="">Última atualização: —</time>
         </div>
+        <section class="controls" role="region" aria-label="Controles do dashboard">
+          <label class="control select-control">
+            <span class="control-label">Alvo de ping</span>
+            <div class="target-status-row">
+              <select id="targetSelect" aria-label="Selecionar alvo de ping" disabled></select>
+              <span id="pingModeIndicator" class="badge badge-mode" hidden>ICMP</span>
+              <span id="staleBadge" class="badge badge-stale" hidden>Desatualizado</span>
+            </div>
+          </label>
+          <div class="control range-control" role="group" aria-label="Janela visual">
+            <span class="control-label">Janela visual</span>
+            <div id="rangeButtons" class="range-buttons" role="group"></div>
+          </div>
+          <button id="pauseStream" class="control ghost-button" aria-pressed="false">Pausar stream</button>
+        </section>
       </header>
 
-      <section class="controls" role="region" aria-label="Controles do dashboard">
-        <label class="control select-control">
-          <span class="control-label">Alvo de ping</span>
-          <div class="target-status-row">
-            <select id="targetSelect" aria-label="Selecionar alvo de ping" disabled></select>
-            <span id="pingModeIndicator" class="badge badge-mode" hidden>ICMP</span>
-            <span id="staleBadge" class="badge badge-stale" hidden>Desatualizado</span>
-          </div>
-        </label>
-        <div class="control range-control" role="group" aria-label="Janela visual">
-          <span class="control-label">Janela visual</span>
-          <div id="rangeButtons" class="range-buttons" role="group"></div>
-        </div>
-        <button id="pauseStream" class="control ghost-button" aria-pressed="false">Pausar stream</button>
-      </section>
-
       <section class="kpi-section" aria-label="Indicadores principais">
+        <!-- Grid principal de KPIs com 6 cards fixos -->
         <div class="kpi-grid">
-          <article class="kpi-card" data-kpi="ping-p95">
+          <article class="kpi-card" data-kpi="ping-p95" data-loading="true">
             <div class="kpi-header">
               <div class="kpi-label-group">
                 <span class="kpi-icon" aria-hidden="true">
@@ -120,11 +125,11 @@ export function renderIndexPage(uiConfig, options = {}) {
             </div>
             <div class="kpi-value" data-value>—</div>
             <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-p95">Sem dados</span>
+              <span class="kpi-sub" data-sub="ping-p95">Sem dados no período</span>
             </div>
           </article>
 
-          <article class="kpi-card" data-kpi="ping-p50">
+          <article class="kpi-card" data-kpi="ping-p50" data-loading="true">
             <div class="kpi-header">
               <div class="kpi-label-group">
                 <span class="kpi-icon" aria-hidden="true">
@@ -142,11 +147,11 @@ export function renderIndexPage(uiConfig, options = {}) {
             </div>
             <div class="kpi-value" data-value>—</div>
             <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-p50">Sem dados</span>
+              <span class="kpi-sub" data-sub="ping-p50">Sem dados no período</span>
             </div>
           </article>
 
-          <article class="kpi-card" data-kpi="ping-avg">
+          <article class="kpi-card" data-kpi="ping-avg" data-loading="true">
             <div class="kpi-header">
               <div class="kpi-label-group">
                 <span class="kpi-icon" aria-hidden="true">
@@ -164,11 +169,11 @@ export function renderIndexPage(uiConfig, options = {}) {
             </div>
             <div class="kpi-value" data-value>—</div>
             <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-avg">Sem dados</span>
+              <span class="kpi-sub" data-sub="ping-avg">Sem dados no período</span>
             </div>
           </article>
 
-          <article class="kpi-card" data-kpi="ping-loss">
+          <article class="kpi-card" data-kpi="ping-loss" data-loading="true">
             <div class="kpi-header">
               <div class="kpi-label-group">
                 <span class="kpi-icon" aria-hidden="true">
@@ -186,11 +191,11 @@ export function renderIndexPage(uiConfig, options = {}) {
             </div>
             <div class="kpi-value" data-value>—</div>
             <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-loss">Sem dados</span>
+              <span class="kpi-sub" data-sub="ping-loss">Sem dados no período</span>
             </div>
           </article>
 
-          <article class="kpi-card" data-kpi="ping-availability">
+          <article class="kpi-card" data-kpi="ping-availability" data-loading="true">
             <div class="kpi-header">
               <div class="kpi-label-group">
                 <span class="kpi-icon" aria-hidden="true">
@@ -208,11 +213,11 @@ export function renderIndexPage(uiConfig, options = {}) {
             </div>
             <div class="kpi-value" data-value>—</div>
             <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-availability">Sem dados</span>
+              <span class="kpi-sub" data-sub="ping-availability">Sem dados no período</span>
             </div>
           </article>
 
-          <article class="kpi-card" data-kpi="dns-lookup">
+          <article class="kpi-card" data-kpi="dns-lookup" data-loading="true">
             <div class="kpi-header">
               <div class="kpi-label-group">
                 <span class="kpi-icon" aria-hidden="true">
@@ -230,58 +235,19 @@ export function renderIndexPage(uiConfig, options = {}) {
             </div>
             <div class="kpi-value" data-value>—</div>
             <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="dns-lookup">Sem dados</span>
-            </div>
-          </article>
-
-          <article class="kpi-card" data-kpi="http-ttfb">
-            <div class="kpi-header">
-              <div class="kpi-label-group">
-                <span class="kpi-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" focusable="false"><path d="M5 12h14M12 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </span>
-                <div>
-                  <span class="kpi-title">TTFB (1m)</span>
-                  <button class="kpi-help" type="button" data-tooltip="httpTtfb" aria-label="Ajuda TTFB">?</button>
-                </div>
-              </div>
-              <div class="kpi-trend" data-trend="http-ttfb">
-                <span class="trend-arrow" aria-hidden="true"></span>
-                <span class="trend-label">—</span>
-              </div>
-            </div>
-            <div class="kpi-value" data-value>—</div>
-            <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="http-ttfb">Sem dados</span>
-            </div>
-          </article>
-
-          <article class="kpi-card" data-kpi="http-total">
-            <div class="kpi-header">
-              <div class="kpi-label-group">
-                <span class="kpi-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 4h7l3 6h6l-3 10H6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                </span>
-                <div>
-                  <span class="kpi-title">HTTP total (1m)</span>
-                  <button class="kpi-help" type="button" data-tooltip="httpTotal" aria-label="Ajuda tempo total">?</button>
-                </div>
-              </div>
-              <div class="kpi-trend" data-trend="http-total">
-                <span class="trend-arrow" aria-hidden="true"></span>
-                <span class="trend-label">—</span>
-              </div>
-            </div>
-            <div class="kpi-value" data-value>—</div>
-            <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="http-total">Sem dados</span>
+              <span class="kpi-sub" data-sub="dns-lookup">Sem dados no período</span>
             </div>
           </article>
         </div>
       </section>
 
-      <main class="dashboard-grid" id="dashboardRoot">
-        <section class="panel panel-large" aria-label="Séries temporais de ping">
+      <section id="networkStatusBar" class="network-status" role="status" aria-live="polite">
+        <!-- Barra de estado dinâmico da rede -->
+        <span id="networkStatusText">Avaliando condições da rede…</span>
+      </section>
+
+      <main class="dashboard-layout" id="dashboardRoot">
+        <section class="panel panel-large trend-panel" aria-label="Tendência de latência e perda">
           <div class="panel-header">
             <h2>Latência e perda</h2>
             <div class="panel-actions">
@@ -295,52 +261,56 @@ export function renderIndexPage(uiConfig, options = {}) {
           <div id="latencyChart" class="chart chart-large" role="img" aria-label="Gráfico de RTT"></div>
         </section>
 
-        <section class="panel panel-medium" aria-label="Heatmap RTT">
-          <div class="panel-header">
-            <h2>Heatmap RTT p95</h2>
-          </div>
-          <div id="heatmapChart" class="chart chart-medium" role="img" aria-label="Heatmap RTT"></div>
-        </section>
+        <div class="detail-grid" role="region" aria-label="Detalhes complementares">
+          <section class="panel panel-medium" aria-label="Heatmap RTT">
+            <div class="panel-header">
+              <h2>Heatmap RTT p95</h2>
+            </div>
+            <div id="heatmapChart" class="chart chart-medium" role="img" aria-label="Heatmap RTT"></div>
+          </section>
 
-        <section class="panel panel-gauge" aria-label="Disponibilidade">
-          <div class="panel-header">
-            <h2>Disponibilidade (1m)</h2>
-          </div>
-          <div id="availabilityGauge" class="chart chart-gauge" role="img" aria-label="Gauge de disponibilidade"></div>
-        </section>
+          <section class="panel panel-gauge" aria-label="Disponibilidade">
+            <div class="panel-header">
+              <h2>Disponibilidade (1m)</h2>
+            </div>
+            <div id="availabilityGauge" class="chart chart-gauge" role="img" aria-label="Gauge de disponibilidade"></div>
+          </section>
 
-        <section class="panel panel-mini" aria-label="DNS Lookup">
-          <div class="panel-header">
-            <h2>DNS Lookup</h2>
-            <span class="panel-subtitle">Últimos 60 min</span>
-          </div>
-          <div id="dnsSparkline" class="chart chart-mini" role="img" aria-label="Série de lookup DNS"></div>
-        </section>
+          <section class="panel panel-mini" aria-label="DNS Lookup">
+            <div class="panel-header">
+              <h2>DNS Lookup</h2>
+              <span class="panel-subtitle">Últimos 60 min</span>
+            </div>
+            <div id="dnsSparkline" class="chart chart-mini" role="img" aria-label="Série de lookup DNS"></div>
+          </section>
+        </div>
 
-        <section class="panel panel-mini" aria-label="HTTP TTFB">
-          <div class="panel-header">
-            <h2>HTTP TTFB</h2>
-            <span class="panel-subtitle">Últimos 60 min</span>
-          </div>
-          <div id="httpTtfbSparkline" class="chart chart-mini" role="img" aria-label="Série de TTFB"></div>
-        </section>
+        <div class="diagnostics-grid" role="region" aria-label="Diagnósticos HTTP e eventos">
+          <section class="panel panel-mini" aria-label="HTTP TTFB">
+            <div class="panel-header">
+              <h2>HTTP TTFB</h2>
+              <span class="panel-subtitle">Últimos 60 min</span>
+            </div>
+            <div id="httpTtfbSparkline" class="chart chart-mini" role="img" aria-label="Série de TTFB"></div>
+          </section>
 
-        <section class="panel panel-mini" aria-label="HTTP Tempo total">
-          <div class="panel-header">
-            <h2>HTTP Tempo total</h2>
-            <span class="panel-subtitle">Últimos 60 min</span>
-          </div>
-          <div id="httpTotalSparkline" class="chart chart-mini" role="img" aria-label="Série de tempo total HTTP"></div>
-        </section>
+          <section class="panel panel-mini" aria-label="HTTP Tempo total">
+            <div class="panel-header">
+              <h2>HTTP Tempo total</h2>
+              <span class="panel-subtitle">Últimos 60 min</span>
+            </div>
+            <div id="httpTotalSparkline" class="chart chart-mini" role="img" aria-label="Série de tempo total HTTP"></div>
+          </section>
 
-        <section class="panel panel-events" aria-label="Eventos e alertas">
-          <div class="panel-header">
-            <h2>Eventos recentes</h2>
-          </div>
-          <ul id="eventList" class="event-list" aria-live="polite"></ul>
-        </section>
+          <section class="panel panel-events" aria-label="Eventos e alertas">
+            <div class="panel-header">
+              <h2>Eventos recentes</h2>
+            </div>
+            <ul id="eventList" class="event-list" aria-live="polite"></ul>
+          </section>
+        </div>
 
-        <section class="panel panel-traceroute" aria-label="Último traceroute">
+        <section class="panel panel-traceroute support-panel" aria-label="Último traceroute">
           <div class="panel-header">
             <div>
               <h2>Último traceroute</h2>
