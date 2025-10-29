@@ -79,13 +79,7 @@ function printDbInfo() {
   }
 
   const db = openDb();
-  const tables = [
-    "ping_sample",
-    "ping_window_1m",
-    "dns_sample",
-    "http_sample",
-    "traceroute_run",
-  ];
+  const tables = ["ping_sample", "ping_window_1m", "dns_sample", "http_sample", "traceroute_run"];
 
   tables.forEach((table) => {
     try {

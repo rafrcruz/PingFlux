@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import dns from "dns";
 import { openDb, migrate } from "../storage/db.js";
+import * as logger from "../utils/logger.js";
 
 const DEFAULT_HOSTNAMES = ["google.com"];
 const DEFAULT_INTERVAL_S = 60;
@@ -204,12 +205,8 @@ export async function resolveOnce(hostname, { signal } = {}) {
 
 export async function measureCycle(hostnames, { signal } = {}) {
   ensureDbReady();
-  const providedList = Array.isArray(hostnames)
-    ? hostnames
-    : getDnsSettings().hostnames;
-  const list = providedList
-    .map((host) => String(host).trim())
-    .filter((host) => host.length > 0);
+  const providedList = Array.isArray(hostnames) ? hostnames : getDnsSettings().hostnames;
+  const list = providedList.map((host) => String(host).trim()).filter((host) => host.length > 0);
 
   const samples = [];
 
@@ -269,10 +266,11 @@ let activeLoopController;
 function createLoopController({ signal } = {}) {
   const settings = getDnsSettings();
   const hostnames = settings.hostnames;
-  console.log(
-    `[dns] Starting DNS loop for: ${hostnames.length ? hostnames.join(", ") : "(none)"}`
+  logger.info(
+    "dns",
+    `Starting DNS loop for: ${hostnames.length ? hostnames.join(", ") : "(none)"}`
   );
-  console.log(`[dns] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
+  logger.info("dns", `Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
 
   let stopRequested = false;
   let pendingSleepResolve = null;
@@ -283,7 +281,7 @@ function createLoopController({ signal } = {}) {
 
   const requestStop = () => {
     if (!stopRequested) {
-      console.log("[dns] Stop requested.");
+      logger.info("dns", "Stop requested.");
       stopRequested = true;
     }
 
@@ -304,7 +302,7 @@ function createLoopController({ signal } = {}) {
   };
 
   const abortHandler = () => {
-    console.log("[dns] Abort signal received, stopping loop...");
+    logger.warn("dns", "Abort signal received, stopping loop...");
     requestStop();
   };
 
@@ -322,11 +320,12 @@ function createLoopController({ signal } = {}) {
         const cycleStart = Date.now();
         try {
           const samples = await measureCycle(hostnames, { signal: loopSignal });
-          console.log(
-            `[dns] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+          logger.info(
+            "dns",
+            `Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
           );
         } catch (error) {
-          console.error("[dns] Cycle error:", error);
+          logger.error("dns", "Cycle error", error);
         }
 
         if (stopRequested) {
@@ -354,7 +353,7 @@ function createLoopController({ signal } = {}) {
       }
       pendingSleepTimer = null;
       pendingSleepResolve = null;
-      console.log("[dns] Loop stopped.");
+      logger.info("dns", "Loop stopped.");
     }
   })();
 

@@ -1,9 +1,10 @@
 import { getConfig } from "./config/index.js";
+import * as logger from "./utils/logger.js";
 
 const config = getConfig();
 
-console.log("PingFlux ready: baseline OK");
-console.log(`NODE_ENV: ${config.env}`);
-console.log(`PORT: ${config.server.port}`);
-console.log(`LOG_LEVEL: ${config.logging.level}`);
-console.log(`DB_PATH: ${config.storage.dbPath}`);
+logger.info("core", "PingFlux ready: baseline OK");
+logger.info("core", `NODE_ENV: ${config.env}`);
+logger.info("core", `PORT: ${config.server.port}`);
+logger.info("core", `LOG_LEVEL: ${config.logging.level}`);
+logger.info("core", `DB_PATH: ${config.storage.dbPath}`);

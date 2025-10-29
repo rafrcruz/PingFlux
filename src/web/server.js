@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import { runTraceroute } from "../collectors/traceroute.js";
 import { createLiveMetricsBroadcaster } from "./live-metrics.js";
 import { renderIndexPage } from "./index-page.js";
+import * as logger from "../utils/logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -72,7 +73,7 @@ async function tryServePublicAsset(res, pathname) {
     if (error?.code === "ENOENT") {
       return false;
     }
-    console.error("[web] Failed to serve asset:", error);
+    logger.error("web", "Failed to serve asset", error);
     sendText(res, 500, "Failed to load asset");
     return true;
   }
@@ -151,7 +152,6 @@ const RANGE_TO_DURATION_MS = {
   "24h": 24 * 60 * 60 * 1000,
 };
 
-const RANGE_OPTIONS = Object.freeze(Object.keys(RANGE_TO_DURATION_MS));
 const FALLBACK_PING_TARGETS = ["3.174.59.117", "8.8.8.8", "1.1.1.1"];
 
 function parseTargetList(raw) {
@@ -222,7 +222,10 @@ function describeWindowLabel(window) {
 
 const UI_SPARKLINE_MINUTES = parseSparklineMinutes(process.env.UI_SPARKLINE_MINUTES);
 const UI_SSE_RETRY_MS = parseRetryInterval(process.env.UI_SSE_RETRY_MS);
-const UI_EVENTS_DEDUP_MS = parsePositiveInt(process.env.UI_EVENTS_DEDUP_MS ?? process.env.EVENTS_DEDUP_MS, 30000);
+const UI_EVENTS_DEDUP_MS = parsePositiveInt(
+  process.env.UI_EVENTS_DEDUP_MS ?? process.env.EVENTS_DEDUP_MS,
+  30000
+);
 const UI_EVENTS_COOLDOWN_MS = parsePositiveInt(
   process.env.UI_EVENTS_COOLDOWN_MS ?? process.env.EVENTS_COOLDOWN_MS,
   10000
@@ -295,10 +298,22 @@ function getUiConfig(providedConfig) {
     uiEwmaAlpha: ewmaAlpha,
     UI_EWMA_ALPHA: ewmaAlpha,
     thresholds: {
-      p95: buildThresholdPair(thresholds.p95?.warn ?? THRESH_P95_WARN_MS, thresholds.p95?.crit ?? THRESH_P95_CRIT_MS),
-      loss: buildThresholdPair(thresholds.loss?.warn ?? THRESH_LOSS_WARN_PCT, thresholds.loss?.crit ?? THRESH_LOSS_CRIT_PCT),
-      dns: buildThresholdPair(thresholds.dns?.warn ?? THRESH_DNS_WARN_MS, thresholds.dns?.crit ?? THRESH_DNS_CRIT_MS),
-      ttfb: buildThresholdPair(thresholds.ttfb?.warn ?? THRESH_TTFB_WARN_MS, thresholds.ttfb?.crit ?? THRESH_TTFB_CRIT_MS),
+      p95: buildThresholdPair(
+        thresholds.p95?.warn ?? THRESH_P95_WARN_MS,
+        thresholds.p95?.crit ?? THRESH_P95_CRIT_MS
+      ),
+      loss: buildThresholdPair(
+        thresholds.loss?.warn ?? THRESH_LOSS_WARN_PCT,
+        thresholds.loss?.crit ?? THRESH_LOSS_CRIT_PCT
+      ),
+      dns: buildThresholdPair(
+        thresholds.dns?.warn ?? THRESH_DNS_WARN_MS,
+        thresholds.dns?.crit ?? THRESH_DNS_CRIT_MS
+      ),
+      ttfb: buildThresholdPair(
+        thresholds.ttfb?.warn ?? THRESH_TTFB_WARN_MS,
+        thresholds.ttfb?.crit ?? THRESH_TTFB_CRIT_MS
+      ),
     },
     health: {
       window: healthWindow,
@@ -349,6 +364,103 @@ function createRequestHandler(db, appConfig, options = {}) {
       }
     : null;
 
+  const healthStatements = hasDb
+    ? {
+        db: db.prepare("SELECT 1"),
+        ping: db.prepare("SELECT 1 FROM ping_sample LIMIT 1"),
+        dns: db.prepare("SELECT 1 FROM dns_sample LIMIT 1"),
+        http: db.prepare("SELECT 1 FROM http_sample LIMIT 1"),
+      }
+    : {};
+  const availableTargets = Array.from(
+    new Set(
+      (Array.isArray(options?.availableTargets) ? options.availableTargets : [])
+        .map((value) => (typeof value === "string" ? value.trim() : ""))
+        .filter((value) => value.length > 0)
+    )
+  );
+  const features = options?.features ?? {};
+  const previousHealthState = new Map();
+  const liveConfig = options?.live ?? {};
+  const liveEnabled = liveConfig.enabled !== false;
+
+  const runStatement = (statement) => {
+    if (!statement) {
+      throw new Error("Statement unavailable");
+    }
+    statement.get();
+  };
+
+  const evaluateComponent = (name, enabled, fn) => {
+    if (!enabled) {
+      previousHealthState.set(name, "ok");
+      return "ok";
+    }
+
+    let status = "ok";
+    try {
+      fn();
+    } catch (error) {
+      status = "error";
+      if (previousHealthState.get(name) !== "error") {
+        logger.error("web", `Health component '${name}' failed`, error);
+      }
+    }
+
+    previousHealthState.set(name, status);
+    return status;
+  };
+
+  const computeHealth = () => {
+    const components = {};
+
+    components.db = evaluateComponent("db", true, () => {
+      if (!hasDb) {
+        throw new Error("Database unavailable");
+      }
+      runStatement(healthStatements.db);
+    });
+
+    const canQuery = components.db === "ok" && hasDb;
+
+    const pingEnabled = features.enablePing !== false;
+    components.ping = canQuery
+      ? evaluateComponent("ping", pingEnabled, () => {
+          runStatement(healthStatements.ping);
+        })
+      : evaluateComponent("ping", pingEnabled, () => {
+          throw new Error("Database unavailable");
+        });
+
+    const dnsEnabled = features.enableDns !== false;
+    components.dns = canQuery
+      ? evaluateComponent("dns", dnsEnabled, () => {
+          runStatement(healthStatements.dns);
+        })
+      : evaluateComponent("dns", dnsEnabled, () => {
+          throw new Error("Database unavailable");
+        });
+
+    const httpEnabled = features.enableHttp !== false;
+    components.http = canQuery
+      ? evaluateComponent("http", httpEnabled, () => {
+          runStatement(healthStatements.http);
+        })
+      : evaluateComponent("http", httpEnabled, () => {
+          throw new Error("Database unavailable");
+        });
+
+    components.live = evaluateComponent("live", liveEnabled, () => {
+      if (!liveMetrics) {
+        throw new Error("Live metrics unavailable");
+      }
+    });
+
+    const status = Object.values(components).every((value) => value === "ok") ? "ok" : "degraded";
+
+    return { components, status };
+  };
+
   const liveMetrics = hasDb
     ? createLiveMetricsBroadcaster({
         db,
@@ -381,14 +493,16 @@ function createRequestHandler(db, appConfig, options = {}) {
     }
 
     if (method === "GET" && parsedUrl.pathname === "/health") {
-      try {
-        if (db) {
-          db.prepare("SELECT 1").get();
-        }
-        sendJson(res, 200, { status: "ok" });
-      } catch (error) {
-        sendJson(res, 500, { status: "error", message: error?.message ?? "Unknown" });
-      }
+      const { components, status } = computeHealth();
+      const payload = {
+        status,
+        uptime_s: Number(process.uptime().toFixed(3)),
+        components,
+        targets_active: availableTargets.length,
+        timestamp: new Date().toISOString(),
+      };
+      const statusCode = status === "ok" ? 200 : 503;
+      sendJson(res, statusCode, payload);
       return;
     }
 
@@ -397,7 +511,10 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "GET" && (parsedUrl.pathname === "/live/metrics" || parsedUrl.pathname === "/v1/live/metrics")) {
+    if (
+      method === "GET" &&
+      (parsedUrl.pathname === "/live/metrics" || parsedUrl.pathname === "/v1/live/metrics")
+    ) {
       if (!liveMetrics) {
         sendJson(res, 503, { error: "Live metrics unavailable" });
         return;
@@ -540,7 +657,11 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "GET" && (parsedUrl.pathname === "/api/traceroute/latest" || parsedUrl.pathname === "/v1/api/traceroute/latest")) {
+    if (
+      method === "GET" &&
+      (parsedUrl.pathname === "/api/traceroute/latest" ||
+        parsedUrl.pathname === "/v1/api/traceroute/latest")
+    ) {
       if (!statements) {
         sendJson(res, 500, { error: "Database unavailable" });
         return;
@@ -640,21 +761,15 @@ function createRequestHandler(db, appConfig, options = {}) {
   return { handler, liveMetrics };
 }
 
-export async function startServer({
-  host,
-  port,
-  db,
-  signal,
-  config,
-  closeTimeoutMs = 1500,
-}) {
+export async function startServer({ host, port, db, signal, config, closeTimeoutMs = 1500 }) {
   const parsedPort = Number.parseInt(String(port ?? 3030), 10);
   const configPort = Number.parseInt(config?.web?.port, 10);
-  const listenPort = Number.isFinite(parsedPort) && parsedPort > 0
-    ? parsedPort
-    : Number.isFinite(configPort) && configPort > 0
-      ? configPort
-      : 3030;
+  const listenPort =
+    Number.isFinite(parsedPort) && parsedPort > 0
+      ? parsedPort
+      : Number.isFinite(configPort) && configPort > 0
+        ? configPort
+        : 3030;
   const providedHost = typeof host === "string" ? host.trim() : "";
   const configHost = typeof config?.web?.host === "string" ? config.web.host.trim() : "";
   const requestedHost = providedHost || configHost;
@@ -695,6 +810,8 @@ export async function startServer({
       pingTargets: config?.ping?.targets,
       staleMs: config?.liveMetrics?.staleMs,
     },
+    availableTargets,
+    features: config?.features,
   });
 
   return new Promise((resolve, reject) => {
@@ -747,7 +864,7 @@ export async function startServer({
           try {
             liveMetrics?.close();
           } catch (error) {
-            console.error("[web] Failed to stop live metrics:", error);
+            logger.error("web", "Failed to stop live metrics", error);
           }
 
           const timeout = setTimeout(() => {
@@ -802,7 +919,7 @@ export async function startServer({
           try {
             liveMetrics?.close();
           } catch (error) {
-            console.error("[web] Failed to stop live metrics during abort:", error);
+            logger.error("web", "Failed to stop live metrics during abort", error);
           }
           server.close(() => {});
           finishReject(new Error("Server shutdown requested before start"));
@@ -824,10 +941,8 @@ export async function startServer({
       try {
         liveMetrics?.close();
       } catch (error) {
-        console.error("[web] Failed to stop live metrics after close:", error);
+        logger.error("web", "Failed to stop live metrics after close", error);
       }
     });
   });
 }
-
-

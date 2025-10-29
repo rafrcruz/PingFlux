@@ -17,7 +17,9 @@ function isResetAllowed() {
 
 function main() {
   if (!isResetAllowed()) {
-    console.error("DB reset denied: set ALLOW_DB_RESET=1 (env or .env) to allow destructive reset.");
+    console.error(
+      "DB reset denied: set ALLOW_DB_RESET=1 (env or .env) to allow destructive reset."
+    );
     process.exitCode = 1;
     return;
   }

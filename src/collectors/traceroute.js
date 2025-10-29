@@ -267,10 +267,13 @@ function executeTraceroute(target, { maxHops, timeoutMs, signal } = {}) {
       }
     };
 
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      terminateChildProcess(child);
-    }, Math.max(timeoutMs, 1000));
+    const timeoutTimer = setTimeout(
+      () => {
+        timedOut = true;
+        terminateChildProcess(child);
+      },
+      Math.max(timeoutMs, 1000)
+    );
 
     let abortListener = null;
     if (signal) {
@@ -314,10 +317,7 @@ export async function runTraceroute(
     1,
     Math.min(envMaxHops, toPositiveInteger(requestedMaxHops, envMaxHops))
   );
-  const effectiveTimeout = Math.max(
-    1000,
-    toPositiveInteger(requestedTimeoutMs, envTimeoutMs)
-  );
+  const effectiveTimeout = Math.max(1000, toPositiveInteger(requestedTimeoutMs, envTimeoutMs));
 
   const ts = Date.now();
   let hops = [];
@@ -330,9 +330,7 @@ export async function runTraceroute(
       signal,
     });
 
-    const combinedOutput = [execution.stdout, execution.stderr]
-      .filter(Boolean)
-      .join("\n");
+    const combinedOutput = [execution.stdout, execution.stderr].filter(Boolean).join("\n");
     hops = parseTracerouteOutput(combinedOutput);
     success = execution.success ? 1 : 0;
   } catch (error) {

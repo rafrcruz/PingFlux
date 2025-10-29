@@ -31,9 +31,10 @@ function resolveRangeOptions(config) {
 
 export function renderIndexPage(uiConfig, options = {}) {
   const resolvedConfig = uiConfig && typeof uiConfig === "object" ? uiConfig : {};
-  const tooltips = options.tooltips && typeof options.tooltips === "object"
-    ? { ...DEFAULT_TOOLTIPS, ...options.tooltips }
-    : DEFAULT_TOOLTIPS;
+  const tooltips =
+    options.tooltips && typeof options.tooltips === "object"
+      ? { ...DEFAULT_TOOLTIPS, ...options.tooltips }
+      : DEFAULT_TOOLTIPS;
   const encodedConfig = serializeConfig({
     ...resolvedConfig,
     rangeOptions: resolveRangeOptions(resolvedConfig),

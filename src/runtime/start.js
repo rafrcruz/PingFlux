@@ -5,6 +5,7 @@ import * as pingAggregator from "../collectors/ping-aggregate-loop.js";
 import * as dnsCollector from "../collectors/dns.js";
 import * as httpCollector from "../collectors/http.js";
 import { startServer } from "../web/server.js";
+import * as logger from "../utils/logger.js";
 import {
   getShutdownSignal,
   registerOnShutdown,
@@ -52,11 +53,11 @@ async function main() {
   try {
     migrate();
   } catch (error) {
-    console.error("[runtime] Failed to migrate database:", error);
+    logger.error("runtime", "Failed to migrate database", error);
     try {
       closeDb();
     } catch (closeError) {
-      console.error("[runtime] Error while closing database after migration failure:", closeError);
+      logger.error("runtime", "Error while closing database after migration failure", closeError);
     }
     process.exit(1);
     return;
@@ -66,7 +67,7 @@ async function main() {
     try {
       closeDb();
     } catch (error) {
-      console.error("[runtime] Error while closing database:", error);
+      logger.error("runtime", "Error while closing database", error);
     }
   });
 
@@ -78,7 +79,7 @@ async function main() {
     }
 
     if (!module || typeof module.runLoop !== "function") {
-      console.warn(`[runtime] Collector '${name}' is missing runLoop(), skipping.`);
+      logger.warn("runtime", `Collector '${name}' is missing runLoop(), skipping.`);
       return false;
     }
 
@@ -87,7 +88,7 @@ async function main() {
       collectorPromises.push(loopPromise);
       loopPromise.catch((error) => {
         if (!shutdownSignal.aborted) {
-          console.error(`[runtime] Collector '${name}' exited with error:`, error);
+          logger.error("runtime", `Collector '${name}' exited with error`, error);
           initiateShutdown(`${name} error`).catch(() => {});
         }
       });
@@ -97,14 +98,14 @@ async function main() {
           try {
             await module.stop();
           } catch (error) {
-            console.error(`[runtime] Error while stopping collector '${name}':`, error);
+            logger.error("runtime", `Error while stopping collector '${name}'`, error);
           }
         });
       }
 
       return true;
     } catch (error) {
-      console.error(`[runtime] Failed to start collector '${name}':`, error);
+      logger.error("runtime", `Failed to start collector '${name}'`, error);
       initiateShutdown(`${name} start failure`).catch(() => {});
       return false;
     }
@@ -142,12 +143,12 @@ async function main() {
         try {
           await serverHandle.close();
         } catch (error) {
-          console.error("[runtime] Error while closing server:", error);
+          logger.error("runtime", "Error while closing server", error);
         }
       });
-      console.log(`[runtime] Web server listening on http://${host}:${port}`);
+      logger.info("runtime", `Web server listening on http://${host}:${port}`);
     } catch (error) {
-      console.error("[runtime] Failed to start web server:", error);
+      logger.error("runtime", "Failed to start web server", error);
       await initiateShutdown("web error");
       process.exit(1);
       return;
@@ -167,20 +168,21 @@ async function main() {
     .filter(([, started]) => started)
     .map(([name]) => name);
 
-  console.log(
-    `[runtime] Modules active: ${startedModules.length ? startedModules.join(", ") : "(none)"}`
+  logger.info(
+    "runtime",
+    `Modules active: ${startedModules.length ? startedModules.join(", ") : "(none)"}`
   );
   if (disabledModules.length > 0) {
-    console.log(`[runtime] Modules disabled via flags: ${disabledModules.join(", ")}`);
+    logger.info("runtime", `Modules disabled via flags: ${disabledModules.join(", ")}`);
   }
 
   registerOnShutdown(() => {
-    console.log("[runtime] Shutdown complete.");
+    logger.info("runtime", "Shutdown complete.");
   });
 
   initSignalHandlers({ gracefulMs: 2000, forceMs: 5000 });
 
-  console.log("[runtime] Runtime initialized. Awaiting shutdown signal...");
+  logger.info("runtime", "Runtime initialized. Awaiting shutdown signal...");
 
   await waitForShutdown();
 
@@ -188,6 +190,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("[runtime] Unexpected startup error:", error);
+  logger.error("runtime", "Unexpected startup error", error);
   process.exit(1);
 });
