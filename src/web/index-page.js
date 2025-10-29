@@ -40,6 +40,8 @@ export function renderIndexPage(uiConfig, options = {}) {
     rangeOptions: resolveRangeOptions(resolvedConfig),
   });
   const encodedTooltips = serializeConfig(tooltips);
+  const faviconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="%2338bdf8"/><stop offset="100%" stop-color="%2334d399"/></linearGradient></defs><rect width="64" height="64" rx="12" fill="%230b1120"/><path d="M8 34c6 0 6-18 12-18s6 32 12 32 6-44 12-44 6 38 12 38" fill="none" stroke="url(%23g)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const faviconHref = `data:image/svg+xml,${encodeURIComponent(faviconSvg)}`;
 
   const themeBootstrap = `(()=>{try{const t=localStorage.getItem('pingflux-theme')==='light'?'light':'dark';document.documentElement.dataset.theme=t;document.documentElement.classList.add('theme-'+t);}catch(e){document.documentElement.dataset.theme='dark';document.documentElement.classList.add('theme-dark');}})();`;
 
@@ -50,6 +52,7 @@ export function renderIndexPage(uiConfig, options = {}) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PingFlux · Observabilidade em tempo real</title>
     <meta name="theme-color" content="#0b1120" />
+    <link rel="icon" type="image/svg+xml" href="${faviconHref}" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" />
