@@ -1,7 +1,12 @@
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
-import { openDb, migrate } from "../storage/db.js";
+import { migrate } from "../storage/db.js";
+import { recordSamples } from "../services/pingService.js";
+import { createLogger } from "../runtime/logger.js";
+import { markCollectorHeartbeat } from "../runtime/collectorState.js";
+
+const log = createLogger("ping");
 
 const DEFAULT_TARGETS = ["8.8.8.8"];
 const DEFAULT_INTERVAL_S = 60;
@@ -155,7 +160,7 @@ function buildPingArgs(target, timeoutMs) {
   return ["-n", "-c", "1", "-W", String(deadlineSeconds), target];
 }
 
-function parseRttFromOutput(output) {
+export function parseRttFromOutput(output) {
   if (!output) {
     return null;
   }
@@ -163,6 +168,11 @@ function parseRttFromOutput(output) {
   const timeMatch = /time[=<\s]*([0-9]+(?:\.[0-9]+)?)\s*ms/i.exec(output);
   if (timeMatch) {
     const value = Number.parseFloat(timeMatch[1]);
+    return Number.isFinite(value) ? value : null;
+  }
+  const tempoMatch = /tempo[=<\s]*([0-9]+(?:\.[0-9]+)?)\s*ms/i.exec(output);
+  if (tempoMatch) {
+    const value = Number.parseFloat(tempoMatch[1]);
     return Number.isFinite(value) ? value : null;
   }
 
@@ -316,24 +326,8 @@ export async function measureCycle(targets, { signal } = {}) {
     return samples;
   }
 
-  const db = openDb();
-  const insert = db.prepare(
-    "INSERT INTO ping_sample (ts, target, method, rtt_ms, success) VALUES (@ts, @target, @method, @rtt_ms, @success)"
-  );
-
-  const insertMany = db.transaction((rows) => {
-    for (const row of rows) {
-      insert.run({
-        ts: row.ts,
-        target: row.target,
-        method: row.method,
-        rtt_ms: row.rtt_ms,
-        success: row.success ? 1 : 0,
-      });
-    }
-  });
-
-  insertMany(samples);
+  recordSamples(samples);
+  markCollectorHeartbeat("ping", { ok: true });
 
   return samples;
 }
@@ -341,12 +335,8 @@ export async function measureCycle(targets, { signal } = {}) {
 function createLoopController({ signal } = {}) {
   const settings = getPingSettings();
   const targets = settings.targets;
-  console.log(
-    `[ping] Starting ping loop for: ${targets.length ? targets.join(", ") : "(none)"}`
-  );
-  console.log(
-    `[ping] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`
-  );
+  log.info(`Starting ping loop for: ${targets.length ? targets.join(", ") : "(none)"}`);
+  log.info(`Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
 
   let stopRequested = false;
   let pendingSleepResolve = null;
@@ -356,7 +346,7 @@ function createLoopController({ signal } = {}) {
 
   const requestStop = () => {
     if (!stopRequested) {
-      console.log("[ping] Stop requested.");
+      log.info("Stop requested.");
       stopRequested = true;
     }
 
@@ -381,7 +371,7 @@ function createLoopController({ signal } = {}) {
   };
 
   const abortHandler = () => {
-    console.log("[ping] Abort signal received, stopping loop...");
+    log.warn("Abort signal received, stopping loop...");
     requestStop();
   };
 
@@ -399,11 +389,12 @@ function createLoopController({ signal } = {}) {
         const cycleStart = Date.now();
         try {
           const samples = await measureCycle(targets, { signal: loopSignal });
-          console.log(
-            `[ping] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+          log.debug(
+            `Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} recorded.`
           );
         } catch (error) {
-          console.error("[ping] Cycle error:", error);
+          log.error("Cycle error", error);
+          markCollectorHeartbeat("ping", { ok: false, error });
         }
 
         if (stopRequested) {
@@ -423,13 +414,13 @@ function createLoopController({ signal } = {}) {
           });
         }
       }
-      } finally {
-        if (pendingSleepTimer !== null) {
-          clearTimeout(pendingSleepTimer);
-        }
-        pendingSleepTimer = null;
-        pendingSleepResolve = null;
-        console.log("[ping] Loop stopped.");
+    } finally {
+      if (pendingSleepTimer !== null) {
+        clearTimeout(pendingSleepTimer);
+      }
+      pendingSleepTimer = null;
+      pendingSleepResolve = null;
+      log.info("Loop stopped.");
     }
   })();
 

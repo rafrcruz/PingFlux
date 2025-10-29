@@ -11,22 +11,8 @@ import {
   waitForShutdown,
   initiateShutdown,
 } from "./shutdown.js";
-
-function toBooleanFlag(value, defaultValue) {
-  if (value === undefined || value === null || value === "") {
-    return defaultValue;
-  }
-
-  const normalized = String(value).trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(normalized)) {
-    return true;
-  }
-  if (["0", "false", "no", "off"].includes(normalized)) {
-    return false;
-  }
-
-  return defaultValue;
-}
+import { createLogger } from "./logger.js";
+import { isEnabled } from "./features.js";
 
 function parsePort(rawPort, fallback) {
   if (rawPort === undefined || rawPort === null || rawPort === "") {
@@ -39,23 +25,28 @@ function parsePort(rawPort, fallback) {
 
 async function main() {
   const config = getConfig();
-  const featureDefaults = config.features ?? {};
-  const enableWeb = toBooleanFlag(process.env.ENABLE_WEB, featureDefaults.enableWeb ?? true);
-  const enablePing = toBooleanFlag(process.env.ENABLE_PING, featureDefaults.enablePing ?? true);
-  const enableDns = toBooleanFlag(process.env.ENABLE_DNS, featureDefaults.enableDns ?? true);
-  const enableHttp = toBooleanFlag(process.env.ENABLE_HTTP, featureDefaults.enableHttp ?? true);
+  const log = createLogger("runtime");
+  const enableWeb = isEnabled("WEB");
+  const enablePing = isEnabled("PING");
+  const enableDns = isEnabled("DNS");
+  const enableHttp = isEnabled("HTTP");
 
   const shutdownSignal = getShutdownSignal();
 
   const db = openDb();
   try {
-    migrate();
+    const result = migrate();
+    if (result?.applied?.length) {
+      log.info(`Applied migrations: ${result.applied.join(", ")}`);
+    } else {
+      log.debug("Database already up-to-date");
+    }
   } catch (error) {
-    console.error("[runtime] Failed to migrate database:", error);
+    log.error("Failed to migrate database", error);
     try {
       closeDb();
     } catch (closeError) {
-      console.error("[runtime] Error while closing database after migration failure:", closeError);
+      log.error("Error while closing database after migration failure", closeError);
     }
     process.exit(1);
     return;
@@ -65,7 +56,7 @@ async function main() {
     try {
       closeDb();
     } catch (error) {
-      console.error("[runtime] Error while closing database:", error);
+      log.warn("Error while closing database", error);
     }
   });
 
@@ -77,7 +68,7 @@ async function main() {
     }
 
     if (!module || typeof module.runLoop !== "function") {
-      console.warn(`[runtime] Collector '${name}' is missing runLoop(), skipping.`);
+      log.warn(`Collector '${name}' is missing runLoop(), skipping.`);
       return false;
     }
 
@@ -86,7 +77,7 @@ async function main() {
       collectorPromises.push(loopPromise);
       loopPromise.catch((error) => {
         if (!shutdownSignal.aborted) {
-          console.error(`[runtime] Collector '${name}' exited with error:`, error);
+          log.error(`Collector '${name}' exited with error`, error);
           initiateShutdown(`${name} error`).catch(() => {});
         }
       });
@@ -96,14 +87,14 @@ async function main() {
           try {
             await module.stop();
           } catch (error) {
-            console.error(`[runtime] Error while stopping collector '${name}':`, error);
+            log.warn(`Error while stopping collector '${name}'`, error);
           }
         });
       }
 
       return true;
     } catch (error) {
-      console.error(`[runtime] Failed to start collector '${name}':`, error);
+      log.error(`Failed to start collector '${name}'`, error);
       initiateShutdown(`${name} start failure`).catch(() => {});
       return false;
     }
@@ -140,12 +131,12 @@ async function main() {
         try {
           await serverHandle.close();
         } catch (error) {
-          console.error("[runtime] Error while closing server:", error);
+          log.warn("Error while closing server", error);
         }
       });
-      console.log(`[runtime] Web server listening on http://${host}:${port}`);
+      log.info(`Web server listening on http://${host}:${port}`);
     } catch (error) {
-      console.error("[runtime] Failed to start web server:", error);
+      log.error("Failed to start web server", error);
       await initiateShutdown("web error");
       process.exit(1);
       return;
@@ -165,20 +156,18 @@ async function main() {
     .filter(([, started]) => started)
     .map(([name]) => name);
 
-  console.log(
-    `[runtime] Modules active: ${startedModules.length ? startedModules.join(", ") : "(none)"}`
-  );
+  log.info(`Modules active: ${startedModules.length ? startedModules.join(", ") : "(none)"}`);
   if (disabledModules.length > 0) {
-    console.log(`[runtime] Modules disabled via flags: ${disabledModules.join(", ")}`);
+    log.info(`Modules disabled via flags: ${disabledModules.join(", ")}`);
   }
 
   registerOnShutdown(() => {
-    console.log("[runtime] Shutdown complete.");
+    log.info("Shutdown complete.");
   });
 
   initSignalHandlers({ gracefulMs: 2000, forceMs: 5000 });
 
-  console.log("[runtime] Runtime initialized. Awaiting shutdown signal...");
+  log.info("Runtime initialized. Awaiting shutdown signal...");
 
   await waitForShutdown();
 
@@ -186,6 +175,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("[runtime] Unexpected startup error:", error);
+  const log = createLogger("runtime");
+  log.error("Unexpected startup error", error);
   process.exit(1);
 });

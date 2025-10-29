@@ -13,10 +13,7 @@ function parsePositiveInteger(value, fallback) {
 
 function resolveSettings() {
   const retentionRawDays = parsePositiveInteger(process.env.RETENTION_RAW_DAYS, 30);
-  const retentionWindowsDays = parsePositiveInteger(
-    process.env.RETENTION_WINDOWS_DAYS,
-    365
-  );
+  const retentionWindowsDays = parsePositiveInteger(process.env.RETENTION_WINDOWS_DAYS, 365);
   const maxRowsPerRun = parsePositiveInteger(process.env.MAINTENANCE_MAX_ROWS_PER_RUN, 0);
 
   return {

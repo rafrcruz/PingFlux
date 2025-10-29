@@ -2,7 +2,12 @@ import fs from "fs";
 import path from "path";
 import http from "http";
 import https from "https";
-import { openDb, migrate } from "../storage/db.js";
+import { migrate } from "../storage/db.js";
+import { recordSamples as recordHttpSamples } from "../services/httpService.js";
+import { createLogger } from "../runtime/logger.js";
+import { markCollectorHeartbeat } from "../runtime/collectorState.js";
+
+const log = createLogger("http");
 
 const DEFAULT_URLS = ["https://example.com"];
 const DEFAULT_INTERVAL_S = 60;
@@ -307,26 +312,8 @@ export async function measureCycle(urls, { signal } = {}) {
     return samples;
   }
 
-  const db = openDb();
-  const insert = db.prepare(
-    "INSERT INTO http_sample (ts, url, status, ttfb_ms, total_ms, bytes, success) VALUES (@ts, @url, @status, @ttfb_ms, @total_ms, @bytes, @success)"
-  );
-
-  const insertMany = db.transaction((rows) => {
-    for (const row of rows) {
-      insert.run({
-        ts: row.ts,
-        url: row.url,
-        status: row.status ?? null,
-        ttfb_ms: row.ttfb_ms ?? null,
-        total_ms: row.total_ms ?? null,
-        bytes: row.bytes ?? null,
-        success: row.success ? 1 : 0,
-      });
-    }
-  });
-
-  insertMany(samples);
+  recordHttpSamples(samples);
+  markCollectorHeartbeat("http", { ok: true });
 
   return samples;
 }
@@ -337,12 +324,8 @@ let activeHttpRequest = null;
 function createLoopController({ signal } = {}) {
   const settings = getHttpSettings();
   const urls = settings.urls;
-  console.log(
-    `[http] Starting HTTP loop for: ${urls.length ? urls.join(", ") : "(none)"}`
-  );
-  console.log(
-    `[http] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`
-  );
+  log.info(`Starting HTTP loop for: ${urls.length ? urls.join(", ") : "(none)"}`);
+  log.info(`Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
 
   let stopRequested = false;
   let pendingSleepResolve = null;
@@ -353,7 +336,7 @@ function createLoopController({ signal } = {}) {
 
   const requestStop = () => {
     if (!stopRequested) {
-      console.log("[http] Stop requested.");
+      log.info("Stop requested.");
       stopRequested = true;
     }
 
@@ -382,7 +365,7 @@ function createLoopController({ signal } = {}) {
   };
 
   const abortHandler = () => {
-    console.log("[http] Abort signal received, stopping loop...");
+    log.warn("Abort signal received, stopping loop...");
     requestStop();
   };
 
@@ -400,11 +383,12 @@ function createLoopController({ signal } = {}) {
         const cycleStart = Date.now();
         try {
           const samples = await measureCycle(urls, { signal: loopSignal });
-          console.log(
-            `[http] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+          log.debug(
+            `Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} recorded.`
           );
         } catch (error) {
-          console.error("[http] Cycle error:", error);
+          log.error("Cycle error", error);
+          markCollectorHeartbeat("http", { ok: false, error });
         }
 
         if (stopRequested) {
@@ -435,7 +419,7 @@ function createLoopController({ signal } = {}) {
       }
       pendingSleepTimer = null;
       pendingSleepResolve = null;
-      console.log("[http] Loop stopped.");
+      log.info("Loop stopped.");
     }
   })();
 

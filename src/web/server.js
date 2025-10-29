@@ -1,6 +1,18 @@
 import http from "http";
 import { runTraceroute } from "../collectors/traceroute.js";
 import { createLiveMetricsBroadcaster } from "./live-metrics.js";
+import { createLogger } from "../runtime/logger.js";
+import { getDbFileInfo } from "../storage/db.js";
+import { getCollectorStates } from "../runtime/collectorState.js";
+import {
+  getWindowAggregates as getPingWindows,
+  getSamplesInRange as getPingSamples,
+} from "../services/pingService.js";
+import { getSamplesInRange as getDnsSamples } from "../services/dnsService.js";
+import { getSamplesInRange as getHttpSamples } from "../services/httpService.js";
+import { getRunById } from "../data/tracerouteRepo.js";
+
+const log = createLogger("web");
 
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
@@ -24,6 +36,19 @@ function sendText(res, statusCode, text) {
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Content-Length", Buffer.byteLength(body));
   res.end(body);
+}
+
+function isLoopback(address) {
+  if (!address) {
+    return false;
+  }
+  if (address === "127.0.0.1" || address === "::1") {
+    return true;
+  }
+  if (address.startsWith("127.")) {
+    return true;
+  }
+  return false;
 }
 
 function readJsonBody(req, maxBytes = 256 * 1024) {
@@ -102,6 +127,8 @@ const RANGE_TO_DURATION_MS = {
 const RANGE_OPTIONS = Object.freeze(Object.keys(RANGE_TO_DURATION_MS));
 const UI_DEFAULT_TARGET = String(process.env.UI_DEFAULT_TARGET ?? "").trim();
 const SPARKLINE_RANGE_OPTIONS = Object.freeze([5, 10, 15]);
+const TARGET_PATTERN = /^[A-Za-z0-9.:_-]+$/;
+const HOSTNAME_PATTERN = /^[A-Za-z0-9.-]+$/;
 
 function parseFiniteNumber(value) {
   const num = Number(value);
@@ -116,6 +143,42 @@ function parseSparklineMinutes(value) {
 function parseRetryInterval(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 3000;
+}
+
+function sanitizeTargetParam(raw) {
+  if (typeof raw !== "string") {
+    return "";
+  }
+  const value = raw.trim();
+  if (!value || value.length > 255) {
+    return "";
+  }
+  return TARGET_PATTERN.test(value) ? value : "";
+}
+
+function sanitizeHostnameParam(raw) {
+  if (typeof raw !== "string") {
+    return "";
+  }
+  const value = raw.trim();
+  if (!value || value.length > 255) {
+    return "";
+  }
+  return HOSTNAME_PATTERN.test(value) ? value : "";
+}
+
+function sanitizeUrlParam(raw) {
+  if (typeof raw !== "string") {
+    return "";
+  }
+  const value = raw.trim();
+  if (!value || value.length > 2048) {
+    return "";
+  }
+  if (/[\s\n]/.test(value)) {
+    return "";
+  }
+  return value;
 }
 
 const UI_SPARKLINE_MINUTES = parseSparklineMinutes(process.env.UI_SPARKLINE_MINUTES);
@@ -146,10 +209,22 @@ function getUiConfig(providedConfig) {
     sseRetryMs: parseRetryInterval(base.sseRetryMs ?? UI_SSE_RETRY_MS),
     rangeOptions: Array.from(SPARKLINE_RANGE_OPTIONS),
     thresholds: {
-      p95: buildThresholdPair(thresholds.p95?.warn ?? THRESH_P95_WARN_MS, thresholds.p95?.crit ?? THRESH_P95_CRIT_MS),
-      loss: buildThresholdPair(thresholds.loss?.warn ?? THRESH_LOSS_WARN_PCT, thresholds.loss?.crit ?? THRESH_LOSS_CRIT_PCT),
-      dns: buildThresholdPair(thresholds.dns?.warn ?? THRESH_DNS_WARN_MS, thresholds.dns?.crit ?? THRESH_DNS_CRIT_MS),
-      ttfb: buildThresholdPair(thresholds.ttfb?.warn ?? THRESH_TTFB_WARN_MS, thresholds.ttfb?.crit ?? THRESH_TTFB_CRIT_MS),
+      p95: buildThresholdPair(
+        thresholds.p95?.warn ?? THRESH_P95_WARN_MS,
+        thresholds.p95?.crit ?? THRESH_P95_CRIT_MS
+      ),
+      loss: buildThresholdPair(
+        thresholds.loss?.warn ?? THRESH_LOSS_WARN_PCT,
+        thresholds.loss?.crit ?? THRESH_LOSS_CRIT_PCT
+      ),
+      dns: buildThresholdPair(
+        thresholds.dns?.warn ?? THRESH_DNS_WARN_MS,
+        thresholds.dns?.crit ?? THRESH_DNS_CRIT_MS
+      ),
+      ttfb: buildThresholdPair(
+        thresholds.ttfb?.warn ?? THRESH_TTFB_WARN_MS,
+        thresholds.ttfb?.crit ?? THRESH_TTFB_CRIT_MS
+      ),
     },
   };
 }
@@ -567,12 +642,12 @@ function renderIndexHtml(providedConfig) {
           return "—";
         }
         if (Math.abs(value) >= 100) {
-          return `${Math.round(value)} ms`;
+          return Math.round(value) + " ms";
         }
         if (Math.abs(value) >= 10) {
-          return `${value.toFixed(1)} ms`;
+          return value.toFixed(1) + " ms";
         }
-        return `${value.toFixed(2)} ms`;
+        return value.toFixed(2) + " ms";
       }
 
       function formatPct(value) {
@@ -580,9 +655,9 @@ function renderIndexHtml(providedConfig) {
           return "—";
         }
         if (Math.abs(value) >= 10) {
-          return `${value.toFixed(1)} %`;
+          return value.toFixed(1) + " %";
         }
-        return `${value.toFixed(2)} %`;
+        return value.toFixed(2) + " %";
       }
 
       function normalizeNumber(value) {
@@ -595,13 +670,13 @@ function renderIndexHtml(providedConfig) {
         for (const minutes of rangeOptions) {
           const option = document.createElement("option");
           option.value = String(minutes);
-          option.textContent = `${minutes} min`;
+          option.textContent = String(minutes) + " min";
           if (minutes === state.rangeMinutes) {
             option.selected = true;
           }
           rangeSelect.appendChild(option);
         }
-        sparklineRangeLabel.textContent = `Últimos ${state.rangeMinutes} minutos`;
+        sparklineRangeLabel.textContent = "Últimos " + state.rangeMinutes + " minutos";
       }
 
       function applyThreshold(card, compareValue, thresholdKey) {
@@ -722,12 +797,12 @@ function renderIndexHtml(providedConfig) {
 
         sparklineEmpty.style.display = "none";
         sparklineSvg.setAttribute("aria-hidden", "false");
-        sparklineSvg.setAttribute("aria-label", `Série histórica do alvo ${target}`);
+        sparklineSvg.setAttribute("aria-label", "Série histórica do alvo " + target);
 
         const width = 600;
         const height = 160;
         const padding = { top: 12, right: 12, bottom: 16, left: 12 };
-        sparklineSvg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+        sparklineSvg.setAttribute("viewBox", "0 0 " + width + " " + height);
 
         const minTs = Math.min(cutoff, ...points.map((entry) => entry.ts));
         const maxTs = Math.max(...points.map((entry) => entry.ts), minTs + 1);
@@ -767,7 +842,7 @@ function renderIndexHtml(providedConfig) {
               const command = index === 0 ? "M" : "L";
               const x = projectX(entry.ts).toFixed(2);
               const y = projectY(entry[key]).toFixed(2);
-              return `${command}${x},${y}`;
+              return command + x + "," + y;
             })
             .join(" ");
           path.setAttribute("d", d);
@@ -876,7 +951,7 @@ function renderIndexHtml(providedConfig) {
         }
 
         setConnectionStatus(isReconnect ? "reconnecting" : "connecting");
-        eventSource = new EventSource("/live/metrics");
+        eventSource = new EventSource("/v1/live/metrics");
 
         eventSource.onopen = () => {
           setConnectionStatus("live");
@@ -948,45 +1023,20 @@ function resolveRangeWindow(rawRange) {
 }
 
 function createRequestHandler(db, appConfig, options = {}) {
-  const hasDb = db && typeof db.prepare === "function";
-  const statements = hasDb
-    ? {
-        pingWindowAll: db.prepare(
-          "SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? ORDER BY target ASC, ts_min ASC"
-        ),
-        pingWindowByTarget: db.prepare(
-          "SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? AND target = ? ORDER BY ts_min ASC"
-        ),
-        dnsSamplesAll: db.prepare(
-          "SELECT ts, hostname, resolver, lookup_ms, success FROM dns_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
-        ),
-        dnsSamplesByHostname: db.prepare(
-          "SELECT ts, hostname, resolver, lookup_ms, success FROM dns_sample WHERE ts BETWEEN ? AND ? AND hostname = ? ORDER BY ts ASC"
-        ),
-        httpSamplesAll: db.prepare(
-          "SELECT ts, url, status, ttfb_ms, total_ms, bytes, success FROM http_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
-        ),
-        httpSamplesByUrl: db.prepare(
-          "SELECT ts, url, status, ttfb_ms, total_ms, bytes, success FROM http_sample WHERE ts BETWEEN ? AND ? AND url = ? ORDER BY ts ASC"
-        ),
-        tracerouteById: db.prepare(
-          "SELECT id, ts, target, hops_json, success FROM traceroute_run WHERE id = ?"
-        ),
-      }
-    : null;
-
-  const liveMetrics = hasDb
-    ? createLiveMetricsBroadcaster({
-        db,
-        config: {
-          pushIntervalMs: options?.live?.pushIntervalMs,
-          useWindows: options?.live?.useWindows,
-          pingTargets: options?.live?.pingTargets,
-        },
-      })
-    : null;
+  const liveMetrics = createLiveMetricsBroadcaster({
+    config: {
+      pushIntervalMs: options?.live?.pushIntervalMs,
+      useWindows: options?.live?.useWindows,
+      pingTargets: options?.live?.pingTargets,
+    },
+  });
 
   const handler = async (req, res) => {
+    if (!isLoopback(req.socket?.remoteAddress)) {
+      sendJson(res, 403, { error: "Loopback access only" });
+      return;
+    }
+
     const { method, url } = req;
     if (!method || !url) {
       sendText(res, 400, "Bad request");
@@ -1001,24 +1051,57 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/health") {
+    const pathname = parsedUrl.pathname;
+
+    if (method === "GET" && pathname === "/health") {
+      const dbInfo = getDbFileInfo();
+      let dbOk = false;
       try {
-        if (db) {
-          db.prepare("SELECT 1").get();
-        }
-        sendJson(res, 200, { status: "ok" });
+        db?.prepare("SELECT 1").get();
+        dbOk = true;
       } catch (error) {
-        sendJson(res, 500, { status: "error", message: error?.message ?? "Unknown" });
+        dbOk = false;
+        log.warn("Health check query failed", error);
+      }
+
+      const sizeMb = dbInfo.exists ? Number((dbInfo.sizeBytes / (1024 * 1024)).toFixed(3)) : 0;
+      const collectorStates = getCollectorStates();
+      const liveStatus = liveMetrics
+        ? liveMetrics.getStatus()
+        : { interval_ms: null, subscribers: 0, last_dispatch_ts: null };
+
+      sendJson(res, 200, {
+        db: {
+          ok: dbOk,
+          size_mb: sizeMb,
+          last_vacuum_at: null,
+        },
+        collectors: {
+          ping: collectorStates.ping?.status ?? "down",
+          dns: collectorStates.dns?.status ?? "down",
+          http: collectorStates.http?.status ?? "down",
+        },
+        live: liveStatus,
+      });
+      return;
+    }
+
+    if (method === "GET" && pathname === "/ready") {
+      try {
+        db?.prepare("SELECT 1").get();
+        sendJson(res, 200, { ready: true });
+      } catch (error) {
+        sendJson(res, 503, { ready: false, error: error?.message ?? "Database unavailable" });
       }
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/api/ui-config") {
+    if (method === "GET" && pathname === "/v1/api/ui-config") {
       sendJson(res, 200, getUiConfig(appConfig));
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/live/metrics") {
+    if (method === "GET" && pathname === "/v1/live/metrics") {
       if (!liveMetrics) {
         sendJson(res, 503, { error: "Live metrics unavailable" });
         return;
@@ -1027,10 +1110,10 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "POST" && parsedUrl.pathname === "/actions/traceroute") {
+    if (method === "POST" && pathname === "/v1/actions/traceroute") {
       let body;
       try {
-        body = await readJsonBody(req);
+        body = await readJsonBody(req, 16 * 1024);
       } catch (error) {
         const status = error?.message === "Body too large" ? 413 : 400;
         sendJson(res, status, { error: error?.message ?? "Invalid body" });
@@ -1038,19 +1121,25 @@ function createRequestHandler(db, appConfig, options = {}) {
       }
 
       const payload = body && typeof body === "object" ? body : {};
-      const rawTarget = typeof payload.target === "string" ? payload.target.trim() : "";
-      const parsedMaxHops = Number.parseInt(payload.maxHops, 10);
-      const parsedTimeoutMs = Number.parseInt(payload.timeoutMs, 10);
-      const options = {};
-      if (Number.isFinite(parsedMaxHops) && parsedMaxHops > 0) {
-        options.maxHops = parsedMaxHops;
+      const target = sanitizeTargetParam(payload.target ?? "");
+      const maxHops = Number.parseInt(payload.maxHops, 10);
+      const timeoutMs = Number.parseInt(payload.timeoutMs, 10);
+
+      if (!target) {
+        sendJson(res, 400, { error: "Invalid target" });
+        return;
       }
-      if (Number.isFinite(parsedTimeoutMs) && parsedTimeoutMs > 0) {
-        options.timeoutMs = parsedTimeoutMs;
+
+      const options = {};
+      if (Number.isFinite(maxHops)) {
+        options.maxHops = Math.min(Math.max(maxHops, 1), 60);
+      }
+      if (Number.isFinite(timeoutMs)) {
+        options.timeoutMs = Math.min(Math.max(timeoutMs, 1000), 60000);
       }
 
       try {
-        const result = await runTraceroute(rawTarget, options);
+        const result = await runTraceroute(target, options);
         sendJson(res, 200, {
           id: result.id,
           ts: result.ts,
@@ -1063,22 +1152,21 @@ function createRequestHandler(db, appConfig, options = {}) {
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/api/ping/window") {
-      if (!statements) {
-        sendJson(res, 500, { error: "Database unavailable" });
+    if (method === "GET" && pathname === "/v1/api/ping/window") {
+      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
+      const rawTarget = parsedUrl.searchParams.get("target");
+      const target = sanitizeTargetParam(rawTarget);
+      if (rawTarget && !target) {
+        sendJson(res, 400, { error: "Invalid target" });
         return;
       }
 
-      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
-      const rawTarget = parsedUrl.searchParams.get("target");
-      const target = typeof rawTarget === "string" ? rawTarget.trim() : "";
-
       try {
         if (target) {
-          const rows = statements.pingWindowByTarget.all(fromMs, toMs, target);
+          const rows = getPingWindows({ fromMs, toMs, target });
           sendJson(res, 200, rows);
         } else {
-          const rows = statements.pingWindowAll.all(fromMs, toMs);
+          const rows = getPingWindows({ fromMs, toMs });
           const grouped = Object.create(null);
           for (const row of rows) {
             if (!grouped[row.target]) {
@@ -1089,115 +1177,108 @@ function createRequestHandler(db, appConfig, options = {}) {
           sendJson(res, 200, grouped);
         }
       } catch (error) {
-        sendJson(res, 500, { error: error?.message ?? "Query failed" });
+        log.error("Failed to query ping windows", error);
+        sendJson(res, 500, { error: "Query failed" });
       }
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/api/dns") {
-      if (!statements) {
-        sendJson(res, 500, { error: "Database unavailable" });
+    if (method === "GET" && pathname === "/v1/api/dns") {
+      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
+      const rawHostname = parsedUrl.searchParams.get("hostname");
+      const hostname = sanitizeHostnameParam(rawHostname);
+      if (rawHostname && !hostname) {
+        sendJson(res, 400, { error: "Invalid hostname" });
         return;
       }
 
-      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
-      const rawHostname = parsedUrl.searchParams.get("hostname");
-      const hostname = typeof rawHostname === "string" ? rawHostname.trim() : "";
-
       try {
-        const baseRows = hostname
-          ? statements.dnsSamplesByHostname.all(fromMs, toMs, hostname)
-          : statements.dnsSamplesAll.all(fromMs, toMs);
-        const mapped = baseRows.map((row) => ({
+        const rows = hostname
+          ? getDnsSamples({ fromMs, toMs, hostname })
+          : getDnsSamples({ fromMs, toMs });
+        const mapped = rows.map((row) => ({
           ts: row.ts,
           hostname: row.hostname,
           resolver: row.resolver,
           lookup_ms: row.lookup_ms,
-          success: row.success === 1,
+          success: row.success === 1 || row.success === true,
         }));
         sendJson(res, 200, mapped);
       } catch (error) {
-        sendJson(res, 500, { error: error?.message ?? "Query failed" });
+        log.error("Failed to query DNS samples", error);
+        sendJson(res, 500, { error: "Query failed" });
       }
       return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/api/http") {
-      if (!statements) {
-        sendJson(res, 500, { error: "Database unavailable" });
+    if (method === "GET" && pathname === "/v1/api/http") {
+      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
+      const rawUrlParam = parsedUrl.searchParams.get("url");
+      const urlParam = sanitizeUrlParam(rawUrlParam);
+      if (rawUrlParam && !urlParam) {
+        sendJson(res, 400, { error: "Invalid url parameter" });
         return;
       }
 
-      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
-      const rawUrlParam = parsedUrl.searchParams.get("url");
-      const urlParam = typeof rawUrlParam === "string" ? rawUrlParam.trim() : "";
-
       try {
-        const baseRows = urlParam
-          ? statements.httpSamplesByUrl.all(fromMs, toMs, urlParam)
-          : statements.httpSamplesAll.all(fromMs, toMs);
-        const mapped = baseRows.map((row) => ({
+        const rows = urlParam
+          ? getHttpSamples({ fromMs, toMs, url: urlParam })
+          : getHttpSamples({ fromMs, toMs });
+        const mapped = rows.map((row) => ({
           ts: row.ts,
           url: row.url,
           status: row.status,
           ttfb_ms: row.ttfb_ms,
           total_ms: row.total_ms,
           bytes: row.bytes,
-          success: row.success === 1,
+          success: row.success === 1 || row.success === true,
         }));
         sendJson(res, 200, mapped);
       } catch (error) {
-        sendJson(res, 500, { error: error?.message ?? "Query failed" });
+        log.error("Failed to query HTTP samples", error);
+        sendJson(res, 500, { error: "Query failed" });
       }
       return;
     }
 
-    if (method === "GET") {
-      const tracerouteMatch = /^\/api\/traceroute\/(\d+)$/.exec(parsedUrl.pathname);
-      if (tracerouteMatch) {
-        if (!statements) {
-          sendJson(res, 500, { error: "Database unavailable" });
-          return;
-        }
-
-        const id = Number.parseInt(tracerouteMatch[1], 10);
-        if (!Number.isFinite(id) || id <= 0) {
-          sendJson(res, 400, { error: "Invalid traceroute id" });
-          return;
-        }
-
-        try {
-          const row = statements.tracerouteById.get(id);
-          if (!row) {
-            sendJson(res, 404, { error: "Traceroute not found" });
-            return;
-          }
-
-          let hops = [];
-          try {
-            const parsed = JSON.parse(row.hops_json ?? "[]");
-            if (Array.isArray(parsed)) {
-              hops = parsed;
-            }
-          } catch (error) {
-            hops = [];
-          }
-
-          sendJson(res, 200, {
-            id: row.id,
-            ts: row.ts,
-            target: row.target,
-            success: row.success,
-            hops,
-          });
-        } catch (error) {
-          sendJson(res, 500, { error: error?.message ?? "Query failed" });
-        }
+    if (method === "GET" && pathname.startsWith("/v1/api/traceroute/")) {
+      const idPart = pathname.substring("/v1/api/traceroute/".length);
+      const id = Number.parseInt(idPart, 10);
+      if (!Number.isFinite(id) || id <= 0) {
+        sendJson(res, 400, { error: "Invalid traceroute id" });
         return;
       }
+
+      try {
+        const row = getRunById(id);
+        if (!row) {
+          sendJson(res, 404, { error: "Traceroute not found" });
+          return;
+        }
+        let hops = [];
+        try {
+          const parsed = JSON.parse(row.hops_json ?? "[]");
+          if (Array.isArray(parsed)) {
+            hops = parsed;
+          }
+        } catch (error) {
+          hops = [];
+        }
+        sendJson(res, 200, {
+          id: row.id,
+          ts: row.ts,
+          target: row.target,
+          success: row.success,
+          hops,
+        });
+      } catch (error) {
+        log.error("Failed to load traceroute run", error);
+        sendJson(res, 500, { error: "Query failed" });
+      }
+      return;
     }
 
-    if (method === "GET" && parsedUrl.pathname === "/") {
+    if (method === "GET" && pathname === "/") {
       sendHtml(res, 200, renderIndexHtml(appConfig));
       return;
     }
@@ -1208,14 +1289,7 @@ function createRequestHandler(db, appConfig, options = {}) {
   return { handler, liveMetrics };
 }
 
-export async function startServer({
-  host,
-  port,
-  db,
-  signal,
-  config,
-  closeTimeoutMs = 1500,
-}) {
+export async function startServer({ host, port, db, signal, config, closeTimeoutMs = 1500 }) {
   const parsedPort = Number.parseInt(String(port ?? 3030), 10);
   const listenPort = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3030;
   const providedHost = typeof host === "string" ? host.trim() : "";
@@ -1291,7 +1365,7 @@ export async function startServer({
           try {
             liveMetrics?.close();
           } catch (error) {
-            console.error("[web] Failed to stop live metrics:", error);
+            log.warn("Failed to stop live metrics", error);
           }
 
           const timeout = setTimeout(() => {
@@ -1340,13 +1414,15 @@ export async function startServer({
     if (signal) {
       const handleAbort = () => {
         if (exportedClose) {
-          exportedClose().catch(() => {});
+          exportedClose().catch((error) => {
+            log.warn("Failed to stop live metrics during abort", error);
+          });
         } else {
           closeRequested = true;
           try {
             liveMetrics?.close();
           } catch (error) {
-            console.error("[web] Failed to stop live metrics during abort:", error);
+            log.warn("Failed to stop live metrics during abort", error);
           }
           server.close(() => {});
           finishReject(new Error("Server shutdown requested before start"));
@@ -1368,10 +1444,8 @@ export async function startServer({
       try {
         liveMetrics?.close();
       } catch (error) {
-        console.error("[web] Failed to stop live metrics after close:", error);
+        log.warn("Failed to stop live metrics after close", error);
       }
     });
   });
 }
-
-

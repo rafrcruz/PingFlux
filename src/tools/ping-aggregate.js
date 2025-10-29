@@ -50,8 +50,8 @@ function runWithSince(sinceValue) {
 
   console.log(
     `[ping:aggregate] Processed ${processed} ${pluralizeWindows(processed)} between ${formatIso(
-      sinceValue,
-    )} and ${formatIso(now)}.`,
+      sinceValue
+    )} and ${formatIso(now)}.`
   );
 }
 
@@ -63,8 +63,8 @@ function runWithDefaultLookback() {
 
   console.log(
     `[ping:aggregate] Processed ${processed} ${pluralizeWindows(processed)} between ${formatIso(
-      since,
-    )} and ${formatIso(completedAt)}.`,
+      since
+    )} and ${formatIso(completedAt)}.`
   );
 }
 

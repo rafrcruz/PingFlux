@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "start": "node src/runtime/start.js",
-    "test": "echo \"(no tests yet)\" && exit 0",
+    "test": "npm run parse:test",
     "config:print": "node src/tools/config-print.js",
     "db:init": "node scripts/db-init.js",
     "db:health": "node scripts/db-health.js",
     "db:reset": "node scripts/db-reset.js",
+    "db:migrate": "node scripts/db-migrate.js",
     "ping:once": "node src/tools/ping-once.js",
     "ping:loop": "node src/tools/ping-loop.js",
     "ping:aggregate": "node src/tools/ping-aggregate.js",
@@ -17,9 +18,16 @@
     "dns:loop": "node src/tools/dns-loop.js",
     "http:once": "node src/tools/http-once.js",
     "http:loop": "node src/tools/http-loop.js",
-    "maintenance:run": "node src/tools/maintenance-run.js"
+    "maintenance:run": "node src/tools/maintenance-run.js",
+    "diag": "node scripts/diag.js",
+    "parse:test": "node scripts/parse-test.js",
+    "lint": "npx prettier --check .",
+    "format": "npx prettier --write ."
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3"
   }
 }

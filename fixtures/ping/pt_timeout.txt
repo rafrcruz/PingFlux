@@ -1,0 +1,5 @@
+Disparando exemplo.com [93.184.216.34] com 32 bytes de dados:
+Esgotado o tempo limite do pedido.
+
+Estatísticas do Ping para 93.184.216.34:
+    Pacotes: Enviados = 1, Recebidos = 0, Perdidos = 1 (100% de perda),

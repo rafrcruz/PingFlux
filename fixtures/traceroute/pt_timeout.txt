@@ -1,0 +1,8 @@
+Rastreamento da rota para exemplo.com [93.184.216.34]
+com no máximo 30 saltos:
+
+  1    <1 ms    <1 ms    <1 ms  modem [192.168.0.1]
+  2     *        *        *     Tempo esgotado para este pedido.
+  3    30 ms    28 ms    29 ms  exemplo.com [93.184.216.34]
+
+Rastreamento concluído.

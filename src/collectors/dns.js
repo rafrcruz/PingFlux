@@ -1,7 +1,12 @@
 import fs from "fs";
 import path from "path";
 import dns from "dns";
-import { openDb, migrate } from "../storage/db.js";
+import { migrate } from "../storage/db.js";
+import { recordSamples as recordDnsSamples } from "../services/dnsService.js";
+import { createLogger } from "../runtime/logger.js";
+import { markCollectorHeartbeat } from "../runtime/collectorState.js";
+
+const log = createLogger("dns");
 
 const DEFAULT_HOSTNAMES = ["google.com"];
 const DEFAULT_INTERVAL_S = 60;
@@ -204,12 +209,8 @@ export async function resolveOnce(hostname, { signal } = {}) {
 
 export async function measureCycle(hostnames, { signal } = {}) {
   ensureDbReady();
-  const providedList = Array.isArray(hostnames)
-    ? hostnames
-    : getDnsSettings().hostnames;
-  const list = providedList
-    .map((host) => String(host).trim())
-    .filter((host) => host.length > 0);
+  const providedList = Array.isArray(hostnames) ? hostnames : getDnsSettings().hostnames;
+  const list = providedList.map((host) => String(host).trim()).filter((host) => host.length > 0);
 
   const samples = [];
 
@@ -235,24 +236,8 @@ export async function measureCycle(hostnames, { signal } = {}) {
     return samples;
   }
 
-  const db = openDb();
-  const insert = db.prepare(
-    "INSERT INTO dns_sample (ts, hostname, resolver, lookup_ms, success) VALUES (@ts, @hostname, @resolver, @lookup_ms, @success)"
-  );
-
-  const insertMany = db.transaction((rows) => {
-    for (const row of rows) {
-      insert.run({
-        ts: row.ts,
-        hostname: row.hostname,
-        resolver: row.resolver,
-        lookup_ms: row.lookup_ms,
-        success: row.success ? 1 : 0,
-      });
-    }
-  });
-
-  insertMany(samples);
+  recordDnsSamples(samples);
+  markCollectorHeartbeat("dns", { ok: true });
 
   return samples;
 }
@@ -269,10 +254,8 @@ let activeLoopController;
 function createLoopController({ signal } = {}) {
   const settings = getDnsSettings();
   const hostnames = settings.hostnames;
-  console.log(
-    `[dns] Starting DNS loop for: ${hostnames.length ? hostnames.join(", ") : "(none)"}`
-  );
-  console.log(`[dns] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
+  log.info(`Starting DNS loop for: ${hostnames.length ? hostnames.join(", ") : "(none)"}`);
+  log.info(`Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
 
   let stopRequested = false;
   let pendingSleepResolve = null;
@@ -283,7 +266,7 @@ function createLoopController({ signal } = {}) {
 
   const requestStop = () => {
     if (!stopRequested) {
-      console.log("[dns] Stop requested.");
+      log.info("Stop requested.");
       stopRequested = true;
     }
 
@@ -304,7 +287,7 @@ function createLoopController({ signal } = {}) {
   };
 
   const abortHandler = () => {
-    console.log("[dns] Abort signal received, stopping loop...");
+    log.warn("Abort signal received, stopping loop...");
     requestStop();
   };
 
@@ -322,11 +305,12 @@ function createLoopController({ signal } = {}) {
         const cycleStart = Date.now();
         try {
           const samples = await measureCycle(hostnames, { signal: loopSignal });
-          console.log(
-            `[dns] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+          log.debug(
+            `Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} recorded.`
           );
         } catch (error) {
-          console.error("[dns] Cycle error:", error);
+          log.error("Cycle error", error);
+          markCollectorHeartbeat("dns", { ok: false, error });
         }
 
         if (stopRequested) {
@@ -354,7 +338,7 @@ function createLoopController({ signal } = {}) {
       }
       pendingSleepTimer = null;
       pendingSleepResolve = null;
-      console.log("[dns] Loop stopped.");
+      log.info("Loop stopped.");
     }
   })();
 

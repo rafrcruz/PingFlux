@@ -1,7 +1,9 @@
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
-import { openDb, migrate } from "../storage/db.js";
+import { migrate } from "../storage/db.js";
+import { insertRun } from "../data/tracerouteRepo.js";
+import { createLogger } from "../runtime/logger.js";
 
 const DEFAULT_TARGET = "8.8.8.8";
 const DEFAULT_MAX_HOPS = 30;
@@ -9,7 +11,7 @@ const DEFAULT_TIMEOUT_MS = 10000;
 
 let envFileCache;
 let migrationsEnsured = false;
-let insertStatement;
+const log = createLogger("traceroute");
 
 function parseEnvFileOnce() {
   if (envFileCache) {
@@ -76,17 +78,6 @@ function ensureDbReady() {
     migrate();
     migrationsEnsured = true;
   }
-}
-
-function getInsertStatement(db) {
-  if (insertStatement) {
-    return insertStatement;
-  }
-
-  insertStatement = db.prepare(
-    "INSERT INTO traceroute_run (ts, target, hops_json, success) VALUES (?, ?, ?, ?)"
-  );
-  return insertStatement;
 }
 
 function terminateChildProcess(child) {
@@ -198,7 +189,7 @@ function parseHopLine(line) {
   };
 }
 
-function parseTracerouteOutput(output) {
+export function parseTracerouteOutput(output) {
   if (!output) {
     return [];
   }
@@ -267,10 +258,13 @@ function executeTraceroute(target, { maxHops, timeoutMs, signal } = {}) {
       }
     };
 
-    const timeoutTimer = setTimeout(() => {
-      timedOut = true;
-      terminateChildProcess(child);
-    }, Math.max(timeoutMs, 1000));
+    const timeoutTimer = setTimeout(
+      () => {
+        timedOut = true;
+        terminateChildProcess(child);
+      },
+      Math.max(timeoutMs, 1000)
+    );
 
     let abortListener = null;
     if (signal) {
@@ -314,10 +308,7 @@ export async function runTraceroute(
     1,
     Math.min(envMaxHops, toPositiveInteger(requestedMaxHops, envMaxHops))
   );
-  const effectiveTimeout = Math.max(
-    1000,
-    toPositiveInteger(requestedTimeoutMs, envTimeoutMs)
-  );
+  const effectiveTimeout = Math.max(1000, toPositiveInteger(requestedTimeoutMs, envTimeoutMs));
 
   const ts = Date.now();
   let hops = [];
@@ -330,9 +321,7 @@ export async function runTraceroute(
       signal,
     });
 
-    const combinedOutput = [execution.stdout, execution.stderr]
-      .filter(Boolean)
-      .join("\n");
+    const combinedOutput = [execution.stdout, execution.stderr].filter(Boolean).join("\n");
     hops = parseTracerouteOutput(combinedOutput);
     success = execution.success ? 1 : 0;
   } catch (error) {
@@ -341,10 +330,8 @@ export async function runTraceroute(
   }
 
   ensureDbReady();
-  const db = openDb();
-  const stmt = getInsertStatement(db);
-  const info = stmt.run(ts, target, JSON.stringify(hops), success);
-  const id = Number(info.lastInsertRowid);
+  const record = insertRun({ ts, target, hops, success });
+  const id = Number(record?.id ?? 0);
 
   return { id, ts, target, success, hops };
 }

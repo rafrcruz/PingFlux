@@ -1,0 +1,5 @@
+Pinging example.com [93.184.216.34] with 32 bytes of data:
+Request timed out.
+
+Ping statistics for 93.184.216.34:
+    Packets: Sent = 1, Received = 0, Lost = 1 (100% loss),

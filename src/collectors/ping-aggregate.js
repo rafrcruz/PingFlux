@@ -1,4 +1,5 @@
-import { openDb, migrate } from "../storage/db.js";
+import { migrate } from "../storage/db.js";
+import { getSamplesInRange, upsertWindowEntries } from "../services/pingService.js";
 
 const MINUTE_MS = 60 * 1000;
 let migrationsEnsured = false;
@@ -47,52 +48,8 @@ function computeStandardDeviation(values) {
   }
 
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance =
-    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
   return Math.sqrt(variance);
-}
-
-function buildUpsertStatement(db) {
-  return db.prepare(`
-    INSERT INTO ping_window_1m (
-      ts_min,
-      target,
-      sent,
-      received,
-      loss_pct,
-      avg_ms,
-      p50_ms,
-      p95_ms,
-      stdev_ms
-    ) VALUES (
-      @ts_min,
-      @target,
-      @sent,
-      @received,
-      @loss_pct,
-      @avg_ms,
-      @p50_ms,
-      @p95_ms,
-      @stdev_ms
-    )
-    ON CONFLICT(ts_min, target) DO UPDATE SET
-      sent = excluded.sent,
-      received = excluded.received,
-      loss_pct = excluded.loss_pct,
-      avg_ms = excluded.avg_ms,
-      p50_ms = excluded.p50_ms,
-      p95_ms = excluded.p95_ms,
-      stdev_ms = excluded.stdev_ms
-  `);
-}
-
-function buildQueryStatement(db) {
-  return db.prepare(`
-    SELECT ts, target, rtt_ms, success
-    FROM ping_sample
-    WHERE ts BETWEEN ? AND ?
-    ORDER BY ts
-  `);
 }
 
 function buildBuckets(rows) {
@@ -138,8 +95,7 @@ function finalizeBuckets(buckets) {
   const finalized = [];
 
   for (const bucket of buckets.values()) {
-    const lossPct =
-      bucket.sent > 0 ? ((bucket.sent - bucket.received) / bucket.sent) * 100 : 0;
+    const lossPct = bucket.sent > 0 ? ((bucket.sent - bucket.received) / bucket.sent) * 100 : 0;
     const sortedLatencies = bucket.latencies.slice().sort((a, b) => a - b);
     const avg = bucket.latencies.length
       ? bucket.latencies.reduce((sum, value) => sum + value, 0) / bucket.latencies.length
@@ -173,9 +129,7 @@ export function aggregateRange(fromEpochMs, toEpochMs) {
   }
 
   ensureDbReady();
-  const db = openDb();
-  const query = buildQueryStatement(db);
-  const rows = query.all(from, to);
+  const rows = getSamplesInRange({ fromMs: from, toMs: to });
 
   if (!rows.length) {
     return 0;
@@ -191,14 +145,7 @@ export function aggregateRange(fromEpochMs, toEpochMs) {
     return 0;
   }
 
-  const upsert = buildUpsertStatement(db);
-  const runUpserts = db.transaction((entries) => {
-    for (const entry of entries) {
-      upsert.run(entry);
-    }
-  });
-
-  runUpserts(finalized);
+  upsertWindowEntries(finalized);
 
   return finalized.length;
 }

@@ -1,3 +1,6 @@
+import { createLogger } from "./logger.js";
+
+const log = createLogger("runtime");
 const abortController = new AbortController();
 const shutdownTasks = new Set();
 let shutdownStarted = false;
@@ -33,18 +36,14 @@ function scheduleTimers() {
 
   if (Number.isFinite(gracefulMs) && gracefulMs > 0) {
     gracefulTimer = setTimeout(() => {
-      console.warn(
-        `[shutdown] Graceful shutdown still in progress after ${gracefulMs}ms...`
-      );
+      log.warn(`Shutdown still in progress after ${gracefulMs}ms`);
     }, gracefulMs);
     gracefulTimer.unref?.();
   }
 
   if (Number.isFinite(forceMs) && forceMs > 0) {
     forceTimer = setTimeout(() => {
-      console.error(
-        `[shutdown] Shutdown exceeded ${forceMs}ms, forcing process exit.`
-      );
+      log.error(`Shutdown exceeded ${forceMs}ms, forcing process exit`);
       process.exit(0);
     }, forceMs);
     forceTimer.unref?.();
@@ -77,7 +76,7 @@ async function beginShutdown(reason = "unknown") {
   shutdownStarted = true;
   shuttingDownReason = reason;
 
-  console.log(`[shutdown] Received ${reason}, starting shutdown sequence.`);
+  log.info(`[shutdown] Received ${reason}, starting shutdown sequence`);
   abortController.abort();
   scheduleTimers();
 
@@ -87,12 +86,12 @@ async function beginShutdown(reason = "unknown") {
 
     for (const result of results) {
       if (result.status === "rejected") {
-        console.error("[shutdown] Task error:", result.reason);
+        log.error("[shutdown] Task error", result.reason);
       }
     }
 
     const elapsed = Date.now() - start;
-    console.log(`[shutdown] Shutdown tasks completed in ${elapsed}ms.`);
+    log.info(`[shutdown] Shutdown tasks completed in ${elapsed}ms`);
 
     shutdownCompleted = true;
     clearTimers();
@@ -108,7 +107,7 @@ async function beginShutdown(reason = "unknown") {
 function createSignalHandler(signal) {
   return () => {
     beginShutdown(signal).catch((error) => {
-      console.error("[shutdown] Error during shutdown:", error);
+      log.error("[shutdown] Error during shutdown", error);
       process.exit(1);
     });
   };
