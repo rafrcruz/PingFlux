@@ -67,7 +67,11 @@ export function renderIndexPage(uiConfig, options = {}) {
               </svg>
             </span>
             <div class="brand-text">
-              <h1 class="brand-title">PingFlux – Live Network Intelligence</h1>
+              <h1 class="brand-title">
+                <span class="brand-title-main">PingFlux</span>
+                <span class="brand-title-divider" aria-hidden="true">–</span>
+                <span class="brand-title-tagline">Live Network Intelligence</span>
+              </h1>
               <p class="brand-subtitle">Observabilidade contínua de latência, perda e disponibilidade.</p>
             </div>
           </div>
@@ -239,7 +243,7 @@ export function renderIndexPage(uiConfig, options = {}) {
         </section>
 
         <div class="detail-grid" role="region" aria-label="Detalhes complementares">
-          <section class="panel panel-medium" aria-label="Heatmap RTT" data-heatmap-panel>
+          <section class="panel panel-medium" aria-label="Heatmap RTT" data-heatmap-panel data-compact-hidden>
             <div class="panel-header">
               <h2>Heatmap RTT p95</h2>
             </div>
@@ -288,7 +292,7 @@ export function renderIndexPage(uiConfig, options = {}) {
           </section>
         </div>
 
-        <section class="panel panel-traceroute support-panel" aria-label="Último traceroute">
+        <section class="panel panel-traceroute support-panel" aria-label="Último traceroute" data-compact-hidden>
           <div class="panel-header">
             <div>
               <h2>Último traceroute</h2>
