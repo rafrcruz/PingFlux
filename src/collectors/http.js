@@ -3,6 +3,7 @@ import path from "path";
 import http from "http";
 import https from "https";
 import { openDb, migrate } from "../storage/db.js";
+import * as logger from "../utils/logger.js";
 
 const DEFAULT_URLS = ["https://example.com"];
 const DEFAULT_INTERVAL_S = 60;
@@ -337,12 +338,8 @@ let activeHttpRequest = null;
 function createLoopController({ signal } = {}) {
   const settings = getHttpSettings();
   const urls = settings.urls;
-  console.log(
-    `[http] Starting HTTP loop for: ${urls.length ? urls.join(", ") : "(none)"}`
-  );
-  console.log(
-    `[http] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`
-  );
+  logger.info("http", `Starting HTTP loop for: ${urls.length ? urls.join(", ") : "(none)"}`);
+  logger.info("http", `Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
 
   let stopRequested = false;
   let pendingSleepResolve = null;
@@ -353,7 +350,7 @@ function createLoopController({ signal } = {}) {
 
   const requestStop = () => {
     if (!stopRequested) {
-      console.log("[http] Stop requested.");
+      logger.info("http", "Stop requested.");
       stopRequested = true;
     }
 
@@ -382,7 +379,7 @@ function createLoopController({ signal } = {}) {
   };
 
   const abortHandler = () => {
-    console.log("[http] Abort signal received, stopping loop...");
+    logger.warn("http", "Abort signal received, stopping loop...");
     requestStop();
   };
 
@@ -400,11 +397,12 @@ function createLoopController({ signal } = {}) {
         const cycleStart = Date.now();
         try {
           const samples = await measureCycle(urls, { signal: loopSignal });
-          console.log(
-            `[http] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+          logger.info(
+            "http",
+            `Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
           );
         } catch (error) {
-          console.error("[http] Cycle error:", error);
+          logger.error("http", "Cycle error", error);
         }
 
         if (stopRequested) {
@@ -435,7 +433,7 @@ function createLoopController({ signal } = {}) {
       }
       pendingSleepTimer = null;
       pendingSleepResolve = null;
-      console.log("[http] Loop stopped.");
+      logger.info("http", "Loop stopped.");
     }
   })();
 

@@ -47,8 +47,7 @@ function computeStandardDeviation(values) {
   }
 
   const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-  const variance =
-    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+  const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
   return Math.sqrt(variance);
 }
 
@@ -138,8 +137,7 @@ function finalizeBuckets(buckets) {
   const finalized = [];
 
   for (const bucket of buckets.values()) {
-    const lossPct =
-      bucket.sent > 0 ? ((bucket.sent - bucket.received) / bucket.sent) * 100 : 0;
+    const lossPct = bucket.sent > 0 ? ((bucket.sent - bucket.received) / bucket.sent) * 100 : 0;
     const sortedLatencies = bucket.latencies.slice().sort((a, b) => a - b);
     const avg = bucket.latencies.length
       ? bucket.latencies.reduce((sum, value) => sum + value, 0) / bucket.latencies.length

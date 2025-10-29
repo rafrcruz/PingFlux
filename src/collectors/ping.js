@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import net from "net";
 import { getConfig } from "../config/index.js";
 import { openDb, migrate } from "../storage/db.js";
+import * as logger from "../utils/logger.js";
 
 const DEFAULT_TARGETS = ["8.8.8.8"];
 const DEFAULT_INTERVAL_S = 60;
@@ -63,9 +64,10 @@ function buildSettings() {
   const timeoutMs = Number.isFinite(pingConfig.timeoutMs)
     ? Math.max(1, Math.floor(pingConfig.timeoutMs))
     : DEFAULT_TIMEOUT_MS;
-  const methodPreference = typeof pingConfig.methodPreference === "string"
-    ? pingConfig.methodPreference.trim().toLowerCase()
-    : "auto";
+  const methodPreference =
+    typeof pingConfig.methodPreference === "string"
+      ? pingConfig.methodPreference.trim().toLowerCase()
+      : "auto";
   const tcpPort = Number.isFinite(pingConfig.tcpPort)
     ? Math.max(1, Math.floor(pingConfig.tcpPort))
     : DEFAULT_TCP_PORT;
@@ -171,9 +173,7 @@ function updateStateAfterResult({ state, target, method, success, ts, settings }
   }
   state.lastResultSuccess = success ? 1 : 0;
 
-  state.consecutiveSuccesses = success
-    ? (state.consecutiveSuccesses ?? 0) + 1
-    : 0;
+  state.consecutiveSuccesses = success ? (state.consecutiveSuccesses ?? 0) + 1 : 0;
   state.consecutiveFailures = success ? 0 : (state.consecutiveFailures ?? 0) + 1;
 
   if (method === "icmp") {
@@ -196,8 +196,9 @@ function updateStateAfterResult({ state, target, method, success, ts, settings }
       // Trigger fallback to TCP after consecutive ICMP failures for this target.
       state.mode = "tcp";
       state.tcpSuccessStreak = 0;
-      console.warn(
-        `[ping] Falling back to TCP for ${target} after ${state.icmpFailureStreak} consecutive ICMP failures.`
+      logger.warn(
+        "ping",
+        `Falling back to TCP for ${target} after ${state.icmpFailureStreak} consecutive ICMP failures.`
       );
     }
     return;
@@ -209,8 +210,9 @@ function updateStateAfterResult({ state, target, method, success, ts, settings }
       // Return to ICMP once TCP probes have been healthy for the configured streak.
       state.mode = "icmp";
       state.icmpFailureStreak = 0;
-      console.log(
-        `[ping] Restoring ICMP for ${target} after ${state.tcpSuccessStreak} consecutive TCP successes.`
+      logger.info(
+        "ping",
+        `Restoring ICMP for ${target} after ${state.tcpSuccessStreak} consecutive TCP successes.`
       );
     }
   }
@@ -386,9 +388,12 @@ function runTcpProbe(target, port, timeoutMs, { signal } = {}) {
 
     const startTime = Date.now();
 
-    timeoutTimer = setTimeout(() => {
-      settle({ success: false, timedOut: true });
-    }, Math.max(timeoutMs, 1));
+    timeoutTimer = setTimeout(
+      () => {
+        settle({ success: false, timedOut: true });
+      },
+      Math.max(timeoutMs, 1)
+    );
     timeoutTimer.unref?.();
 
     const abortHandler = () => {
@@ -453,7 +458,7 @@ async function executeProbe(target, method, settings, { signal } = {}) {
       }
     }
   } catch (error) {
-    console.error(`[ping] Probe execution failed for ${normalizedTarget}:`, error);
+    logger.error("ping", `Probe execution failed for ${normalizedTarget}`, error);
   }
 
   return sample;
@@ -499,7 +504,7 @@ export async function measureCycle(targets, { signal } = {}) {
     try {
       sample = await executeProbe(trimmedTarget, method, settings, { signal });
     } catch (error) {
-      console.error(`[ping] Cycle probe error for ${trimmedTarget}:`, error);
+      logger.error("ping", `Cycle probe error for ${trimmedTarget}`, error);
       sample = {
         ts: Date.now(),
         target: trimmedTarget,
@@ -550,19 +555,17 @@ export async function measureCycle(targets, { signal } = {}) {
 function createLoopController({ signal } = {}) {
   const settings = getPingSettings();
   const targets = settings.targets;
-  console.log(
-    `[ping] Starting ping loop for: ${targets.length ? targets.join(", ") : "(none)"}`
-  );
-  console.log(
-    `[ping] Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`
-  );
+  logger.info("ping", `Starting ping loop for: ${targets.length ? targets.join(", ") : "(none)"}`);
+  logger.info("ping", `Interval: ${settings.intervalMs / 1000}s, timeout: ${settings.timeoutMs}ms`);
   if (settings.methodPreference === "auto") {
-    console.log(
-      `[ping] Method: auto (fallback after ${settings.fallbackAfterFails} ICMP fails, recover after ${settings.recoveryAfterOks} TCP successes on port ${settings.tcpPort}).`
+    logger.info(
+      "ping",
+      `Method: auto (fallback after ${settings.fallbackAfterFails} ICMP fails, recover after ${settings.recoveryAfterOks} TCP successes on port ${settings.tcpPort}).`
     );
   } else {
-    console.log(
-      `[ping] Method locked to ${settings.methodPreference.toUpperCase()} (TCP port ${settings.tcpPort}).`
+    logger.info(
+      "ping",
+      `Method locked to ${settings.methodPreference.toUpperCase()} (TCP port ${settings.tcpPort}).`
     );
   }
 
@@ -574,7 +577,7 @@ function createLoopController({ signal } = {}) {
 
   const requestStop = () => {
     if (!stopRequested) {
-      console.log("[ping] Stop requested.");
+      logger.info("ping", "Stop requested.");
       stopRequested = true;
     }
 
@@ -599,7 +602,7 @@ function createLoopController({ signal } = {}) {
   };
 
   const abortHandler = () => {
-    console.log("[ping] Abort signal received, stopping loop...");
+    logger.warn("ping", "Abort signal received, stopping loop...");
     requestStop();
   };
 
@@ -617,11 +620,12 @@ function createLoopController({ signal } = {}) {
         const cycleStart = Date.now();
         try {
           const samples = await measureCycle(targets, { signal: loopSignal });
-          console.log(
-            `[ping] Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
+          logger.info(
+            "ping",
+            `Cycle complete: ${samples.length} sample${samples.length === 1 ? "" : "s"} inserted.`
           );
         } catch (error) {
-          console.error("[ping] Cycle error:", error);
+          logger.error("ping", "Cycle error", error);
         }
 
         if (stopRequested) {
@@ -641,13 +645,13 @@ function createLoopController({ signal } = {}) {
           });
         }
       }
-      } finally {
-        if (pendingSleepTimer !== null) {
-          clearTimeout(pendingSleepTimer);
-        }
-        pendingSleepTimer = null;
-        pendingSleepResolve = null;
-        console.log("[ping] Loop stopped.");
+    } finally {
+      if (pendingSleepTimer !== null) {
+        clearTimeout(pendingSleepTimer);
+      }
+      pendingSleepTimer = null;
+      pendingSleepResolve = null;
+      logger.info("ping", "Loop stopped.");
     }
   })();
 

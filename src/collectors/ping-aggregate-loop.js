@@ -1,5 +1,6 @@
 import { aggregateRange } from "./ping-aggregate.js";
 import { getConfig } from "../config/index.js";
+import * as logger from "../utils/logger.js";
 
 const MINUTE_MS = 60 * 1000;
 const DEFAULT_INTERVAL_MS = 60 * 1000;
@@ -133,7 +134,7 @@ function createController({ signal } = {}) {
     try {
       aggregateRange(rangeFrom, rangeTo);
     } catch (error) {
-      console.error("[ping:agg] Failed to aggregate ping windows:", error);
+      logger.error("ping-agg", "Failed to aggregate ping windows", error);
     }
 
     cursorMinute += windowsThisRun * MINUTE_MS;
@@ -144,8 +145,9 @@ function createController({ signal } = {}) {
     const now = Date.now();
     ensureCursor(now);
     if (settings.catchupMinutes > 0) {
-      console.log(
-        `[ping:agg] Catch-up starting from ${new Date(cursorMinute).toISOString()} (last ${settings.catchupMinutes} minute(s)).`
+      logger.info(
+        "ping-agg",
+        `Catch-up starting from ${new Date(cursorMinute).toISOString()} (last ${settings.catchupMinutes} minute(s)).`
       );
     }
     let hasMore = true;
@@ -153,8 +155,9 @@ function createController({ signal } = {}) {
       hasMore = processBatch(now);
     }
     if (settings.catchupMinutes > 0) {
-      console.log(
-        `[ping:agg] Catch-up complete up to ${new Date(Math.min(cursorMinute, floorToMinute(now))).toISOString()}.`
+      logger.info(
+        "ping-agg",
+        `Catch-up complete up to ${new Date(Math.min(cursorMinute, floorToMinute(now))).toISOString()}.`
       );
     }
   };
@@ -182,7 +185,7 @@ function createController({ signal } = {}) {
       resolveDone();
     } catch (error) {
       rejectDone(error);
-      console.error("[ping:agg] Scheduler stopped due to error:", error);
+      logger.error("ping-agg", "Scheduler stopped due to error", error);
     } finally {
       if (signal) {
         signal.removeEventListener("abort", abortHandler);
@@ -227,6 +230,6 @@ export async function stop() {
     activeController.requestStop();
     await activeController.promise;
   } catch (error) {
-    console.error("[ping:agg] Error while stopping aggregator:", error);
+    logger.error("ping-agg", "Error while stopping aggregator", error);
   }
 }

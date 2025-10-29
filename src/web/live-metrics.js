@@ -153,7 +153,10 @@ function computePingWindowMetrics({
         }
         const p50Value = normalizeNumber(entry.p50_ms);
         if (p50Value !== null) {
-          percentileValues.push({ value: p50Value, weight: Number.isFinite(receivedCount) ? receivedCount : 1 });
+          percentileValues.push({
+            value: p50Value,
+            weight: Number.isFinite(receivedCount) ? receivedCount : 1,
+          });
         }
       }
 
@@ -243,7 +246,8 @@ function computePingMetrics({
   const since = now - HOUR_MS;
   const rawRows = recentStmt ? recentStmt.all(since) : [];
   const successRows = successStmt ? successStmt.all(since) : [];
-  const windowRows = useWindows && windowStmt ? windowStmt.all(Math.floor(since / MINUTE_MS) * MINUTE_MS) : [];
+  const windowRows =
+    useWindows && windowStmt ? windowStmt.all(Math.floor(since / MINUTE_MS) * MINUTE_MS) : [];
 
   const rawByTarget = groupRowsByTarget(rawRows, (row) => row.target);
   const successByTarget = groupRowsByTarget(successRows, (row) => row.target);
@@ -308,7 +312,8 @@ function computePingMetrics({
     const ageMs = resolvedTs != null ? Math.max(0, now - resolvedTs) : null;
     // Freshness flag used by the UI to highlight stale data.
     const fresh = ageMs == null ? false : ageMs <= staleLimit;
-    const pingMode = typeof runtimeInfo?.mode === "string" && runtimeInfo.mode ? runtimeInfo.mode : null;
+    const pingMode =
+      typeof runtimeInfo?.mode === "string" && runtimeInfo.mode ? runtimeInfo.mode : null;
     const runtimeCounters = runtimeInfo
       ? {
           consecutiveFailures: Number.isFinite(runtimeInfo.consecutiveFailures)
@@ -417,9 +422,10 @@ class LiveMetricsBroadcaster extends EventEmitter {
     this.intervalMs = Number.isFinite(interval) && interval > 0 ? interval : 2000;
     this.useWindows = Boolean(this.config.useWindows);
     this.pingTargets = Array.isArray(this.config.pingTargets) ? this.config.pingTargets : [];
-    this.staleThresholdMs = Number.isFinite(this.config.staleMs) && this.config.staleMs >= 0
-      ? Number(this.config.staleMs)
-      : 10000;
+    this.staleThresholdMs =
+      Number.isFinite(this.config.staleMs) && this.config.staleMs >= 0
+        ? Number(this.config.staleMs)
+        : 10000;
     this.clients = new Set();
     this.timer = null;
     this.runtimeStateProvider = getPingRuntimeState;
@@ -558,11 +564,31 @@ class LiveMetricsBroadcaster extends EventEmitter {
     return {
       ts: now,
       ping: {},
-      dns: { aggregate: { last_ms: null, win1m_avg_ms: null, win5m_avg_ms: null, win1h_avg_ms: null, samples: 0 } },
+      dns: {
+        aggregate: {
+          last_ms: null,
+          win1m_avg_ms: null,
+          win5m_avg_ms: null,
+          win1h_avg_ms: null,
+          samples: 0,
+        },
+      },
       http: {
         aggregate: {
-          ttfb: { last_ms: null, win1m_avg_ms: null, win5m_avg_ms: null, win1h_avg_ms: null, samples: 0 },
-          total: { last_ms: null, win1m_avg_ms: null, win5m_avg_ms: null, win1h_avg_ms: null, samples: 0 },
+          ttfb: {
+            last_ms: null,
+            win1m_avg_ms: null,
+            win5m_avg_ms: null,
+            win1h_avg_ms: null,
+            samples: 0,
+          },
+          total: {
+            last_ms: null,
+            win1m_avg_ms: null,
+            win5m_avg_ms: null,
+            win1h_avg_ms: null,
+            samples: 0,
+          },
         },
       },
     };
@@ -586,7 +612,9 @@ class LiveMetricsBroadcaster extends EventEmitter {
     const dnsRows = this.statements.dnsRecent ? this.statements.dnsRecent.all(now - HOUR_MS) : [];
     const dns = computeDnsMetrics(dnsRows, now);
 
-    const httpRows = this.statements.httpRecent ? this.statements.httpRecent.all(now - HOUR_MS) : [];
+    const httpRows = this.statements.httpRecent
+      ? this.statements.httpRecent.all(now - HOUR_MS)
+      : [];
     const http = computeHttpMetrics(httpRows, now);
 
     return {

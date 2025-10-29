@@ -17,22 +17,27 @@ const API_PING_WINDOW = ["/v1/api/ping/window", "/api/ping/window"];
 const API_TRACEROUTE_LATEST = ["/v1/api/traceroute/latest", "/api/traceroute/latest"];
 const API_TRACEROUTE_BY_ID = (id) => [`/v1/api/traceroute/${id}`, `/api/traceroute/${id}`];
 
-const DEFAULT_TARGET = typeof CONFIG.DEFAULT_TARGET === "string"
-  ? CONFIG.DEFAULT_TARGET
-  : typeof CONFIG.defaultTarget === "string"
-    ? CONFIG.defaultTarget
-    : "";
+const DEFAULT_TARGET =
+  typeof CONFIG.DEFAULT_TARGET === "string"
+    ? CONFIG.DEFAULT_TARGET
+    : typeof CONFIG.defaultTarget === "string"
+      ? CONFIG.defaultTarget
+      : "";
 const EVENTS_DEDUP_MS = toPositiveInt(CONFIG.EVENTS_DEDUP_MS ?? CONFIG.eventsDedupMs, 30000);
-const EVENTS_COOLDOWN_MS = toPositiveInt(CONFIG.EVENTS_COOLDOWN_MS ?? CONFIG.eventsCooldownMs, 10000);
+const EVENTS_COOLDOWN_MS = toPositiveInt(
+  CONFIG.EVENTS_COOLDOWN_MS ?? CONFIG.eventsCooldownMs,
+  10000
+);
 const TRACEROUTE_MAX_AGE_MIN = toPositiveInt(
   CONFIG.TRACEROUTE_MAX_AGE_MIN ?? CONFIG.tracerouteMaxAgeMin,
   10
 );
 const EVENTS_LIMIT = 50;
 
-const RANGE_OPTIONS = Array.isArray(CONFIG.rangeOptions) && CONFIG.rangeOptions.length
-  ? CONFIG.rangeOptions
-  : [5, 10, 15, 30];
+const RANGE_OPTIONS =
+  Array.isArray(CONFIG.rangeOptions) && CONFIG.rangeOptions.length
+    ? CONFIG.rangeOptions
+    : [5, 10, 15, 30];
 const MAX_RANGE_MINUTES = RANGE_OPTIONS.reduce((max, value) => (value > max ? value : max), 30);
 const HISTORY_LIMIT_MS = MAX_RANGE_MINUTES * 60 * 1000;
 const DNS_HISTORY_LIMIT_MS = 60 * 60 * 1000;
@@ -305,12 +310,22 @@ function initCharts() {
     console.error("ECharts não carregado");
     return;
   }
-  charts.latency = echarts.init(document.getElementById("latencyChart"), null, { renderer: "canvas" });
-  charts.heatmap = echarts.init(document.getElementById("heatmapChart"), null, { renderer: "canvas" });
-  charts.availability = echarts.init(document.getElementById("availabilityGauge"), null, { renderer: "canvas" });
+  charts.latency = echarts.init(document.getElementById("latencyChart"), null, {
+    renderer: "canvas",
+  });
+  charts.heatmap = echarts.init(document.getElementById("heatmapChart"), null, {
+    renderer: "canvas",
+  });
+  charts.availability = echarts.init(document.getElementById("availabilityGauge"), null, {
+    renderer: "canvas",
+  });
   charts.dns = echarts.init(document.getElementById("dnsSparkline"), null, { renderer: "canvas" });
-  charts.httpTtfb = echarts.init(document.getElementById("httpTtfbSparkline"), null, { renderer: "canvas" });
-  charts.httpTotal = echarts.init(document.getElementById("httpTotalSparkline"), null, { renderer: "canvas" });
+  charts.httpTtfb = echarts.init(document.getElementById("httpTtfbSparkline"), null, {
+    renderer: "canvas",
+  });
+  charts.httpTotal = echarts.init(document.getElementById("httpTotalSparkline"), null, {
+    renderer: "canvas",
+  });
 
   configureLatencyChart();
   configureHeatmap();
@@ -345,7 +360,10 @@ function configureLatencyChart() {
     animationDurationUpdate: 260,
     legend: {
       top: 0,
-      textStyle: { color: getComputedStyle(document.documentElement).getPropertyValue("--text-muted") || "#94a3b8" },
+      textStyle: {
+        color:
+          getComputedStyle(document.documentElement).getPropertyValue("--text-muted") || "#94a3b8",
+      },
     },
     grid: { left: 60, right: 60, top: 50, bottom: 70 },
     tooltip: {
@@ -395,10 +413,10 @@ function configureLatencyChart() {
         type: "value",
         name: "ms",
         nameTextStyle: { color: "var(--text-muted)" },
-      axisLabel: {
-        color: "var(--text-muted)",
-        formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)} ms` : value),
-      },
+        axisLabel: {
+          color: "var(--text-muted)",
+          formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)} ms` : value),
+        },
         splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.12)" } },
       },
       {
@@ -942,7 +960,8 @@ function updateKpis(metrics, latestEntry) {
     subText: `5m: ${fmtPct(latestEntry.loss_5m)}`,
   });
   const availability = loss == null ? null : clampGaugeValue(100 - loss);
-  const availability5m = latestEntry.loss_5m == null ? null : clampGaugeValue(100 - latestEntry.loss_5m);
+  const availability5m =
+    latestEntry.loss_5m == null ? null : clampGaugeValue(100 - latestEntry.loss_5m);
   updateKpi("ping-availability", availability, {
     threshold: thresholds.loss,
     higherIsBad: false,
@@ -976,13 +995,14 @@ function updateGauge(value) {
   }
   const numeric = Number.isFinite(value) ? clampGaugeValue(value) : null;
   const color = getAvailabilityColor(numeric);
-  const axisColor = numeric == null
-    ? [[1, "#475569"]]
-    : [
-        [0.95, "#ef4444"],
-        [0.99, "#facc15"],
-        [1, "#22c55e"],
-      ];
+  const axisColor =
+    numeric == null
+      ? [[1, "#475569"]]
+      : [
+          [0.95, "#ef4444"],
+          [0.99, "#facc15"],
+          [1, "#22c55e"],
+        ];
   charts.availability.setOption({
     series: [
       {
@@ -1136,7 +1156,13 @@ function updateKpi(key, value, options = {}) {
         break;
     }
     if (message) {
-      pushEvent({ key: `kpi-${key}-${severity}`, type: `kpi-${key}`, severity, message, icon: "⚠" });
+      pushEvent({
+        key: `kpi-${key}-${severity}`,
+        type: `kpi-${key}`,
+        severity,
+        message,
+        icon: "⚠",
+      });
     }
   }
 }
@@ -1405,12 +1431,7 @@ function renderLatencyChart() {
         { min: 0, max: 1 },
         { min: 0, max: 1 },
       ],
-      series: [
-        { data: [] },
-        { data: [] },
-        { data: [] },
-        { data: [], show: false },
-      ],
+      series: [{ data: [] }, { data: [] }, { data: [] }, { data: [], show: false }],
     });
     state.lossHasData = false;
     updateLatencySeriesVisibility();
@@ -1463,12 +1484,7 @@ function renderLatencyChart() {
       { min: latMinDomain, max: latMaxDomain },
       { min: lossMinDomain, max: lossMaxDomain },
     ],
-    series: [
-      { data: p50 },
-      { data: avg },
-      { data: p95 },
-      { data: loss, show: showLossSeries },
-    ],
+    series: [{ data: p50 }, { data: avg }, { data: p95 }, { data: loss, show: showLossSeries }],
     legend: { selected: { "Perda (%)": showLossSeries } },
   });
 }
@@ -1497,10 +1513,12 @@ function renderSparkline(chart, list) {
     return;
   }
   const raw = list.map((item) => [item.ts, Number.isFinite(item.value) ? item.value : null]);
-  const numericCount = raw.reduce((count, [, value]) => (Number.isFinite(value) ? count + 1 : count), 0);
-  const data = SPARKLINE_EWMA_ALPHA != null
-    ? applySparklineSmoothing(raw, SPARKLINE_EWMA_ALPHA)
-    : raw;
+  const numericCount = raw.reduce(
+    (count, [, value]) => (Number.isFinite(value) ? count + 1 : count),
+    0
+  );
+  const data =
+    SPARKLINE_EWMA_ALPHA != null ? applySparklineSmoothing(raw, SPARKLINE_EWMA_ALPHA) : raw;
   const id = chart.getDom()?.id;
   if (id) {
     setChartEmptyState(id, numericCount === 0);
@@ -1635,7 +1653,9 @@ function renderTraceroute() {
   if (!traceroute || !Array.isArray(traceroute.hops) || traceroute.hops.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = state.selectedTarget ? "Sem dados recentes. Execute um traceroute." : "Selecione um alvo para visualizar.";
+    empty.textContent = state.selectedTarget
+      ? "Sem dados recentes. Execute um traceroute."
+      : "Selecione um alvo para visualizar.";
     refs.tracerouteTimeline.appendChild(empty);
     refs.tracerouteMeta.textContent = "Sem execuções";
     return;
@@ -1655,7 +1675,8 @@ function renderTraceroute() {
     const notice = document.createElement("div");
     notice.className = "traceroute-collapsed";
     const message = document.createElement("p");
-    message.textContent = "Resultado antigo oculto. Você pode executar novamente ou visualizar os hops anteriores.";
+    message.textContent =
+      "Resultado antigo oculto. Você pode executar novamente ou visualizar os hops anteriores.";
     const actions = document.createElement("div");
     actions.className = "traceroute-actions";
     const rerunButton = document.createElement("button");
@@ -1683,11 +1704,15 @@ function renderTraceroute() {
     return;
   }
 
-  const allNoResponse = traceroute.success === 0 && traceroute.hops.every((hop) => {
-    const addr = hop?.address;
-    const rtts = Array.isArray(hop?.rtt) ? hop.rtt.filter((value) => Number.isFinite(Number(value))) : [];
-    return (!addr || addr === "*") && rtts.length === 0;
-  });
+  const allNoResponse =
+    traceroute.success === 0 &&
+    traceroute.hops.every((hop) => {
+      const addr = hop?.address;
+      const rtts = Array.isArray(hop?.rtt)
+        ? hop.rtt.filter((value) => Number.isFinite(Number(value)))
+        : [];
+      return (!addr || addr === "*") && rtts.length === 0;
+    });
 
   if (allNoResponse) {
     const empty = document.createElement("div");
@@ -1710,8 +1735,12 @@ function renderTraceroute() {
     addr.textContent = hop?.address || "*";
     const rtt = document.createElement("span");
     rtt.className = "hop-rtt";
-    const rtts = Array.isArray(hop?.rtt) ? hop.rtt.filter((value) => Number.isFinite(Number(value))) : [];
-    const rttText = rtts.length ? rtts.map((value) => fmtMs(Number(value))).join(" · ") : "sem resposta";
+    const rtts = Array.isArray(hop?.rtt)
+      ? hop.rtt.filter((value) => Number.isFinite(Number(value)))
+      : [];
+    const rttText = rtts.length
+      ? rtts.map((value) => fmtMs(Number(value))).join(" · ")
+      : "sem resposta";
     rtt.textContent = rttText;
     info.append(addr, rtt);
     item.append(indexEl, info);
