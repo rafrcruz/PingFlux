@@ -162,7 +162,13 @@ export function getConfig() {
     Number(DEFAULTS.PING_INTERVAL_S) * 1000
   );
   const pingTimeoutMs = toPositiveInteger(resolveVar("PING_TIMEOUT_MS", fileVariables), Number(DEFAULTS.PING_TIMEOUT_MS));
-  const pingMethod = toMethodPreference(resolveVar("PING_METHOD", fileVariables));
+  const pingMethod = toMethodPreference(
+    process.env.PING_METHOD ??
+      process.env.PING_METHOD_PREFERENCE ??
+      fileVariables.PING_METHOD ??
+      fileVariables.PING_METHOD_PREFERENCE ??
+      DEFAULTS.PING_METHOD
+  );
 
   const dnsHostnames = toStringList(
     resolveVar("DNS_HOSTNAMES", fileVariables),
