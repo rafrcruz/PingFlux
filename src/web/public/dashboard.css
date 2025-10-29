@@ -82,10 +82,6 @@ body {
   margin-block: 1rem;
 }
 
-.page-shell.is-stale .kpi-card {
-  border-color: rgba(148, 163, 184, 0.3);
-}
-
 .app-hero {
   display: flex;
   flex-direction: column;
@@ -357,22 +353,6 @@ body {
   background: rgba(240, 140, 46, 0.18);
   color: var(--badge-tcp);
   border-color: rgba(240, 140, 46, 0.32);
-}
-
-.badge-stale {
-  position: relative;
-  background: rgba(148, 163, 184, 0.16);
-  color: var(--text-soft);
-  border: 1px dashed rgba(148, 163, 184, 0.4);
-  padding-left: 26px;
-}
-
-.badge-stale::before {
-  content: "\23F3";
-  position: absolute;
-  left: 10px;
-  font-size: 0.8rem;
-  opacity: 0.8;
 }
 
 .range-control {
