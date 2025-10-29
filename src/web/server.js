@@ -1637,12 +1637,19 @@ export async function startServer({
   closeTimeoutMs = 1500,
 }) {
   const parsedPort = Number.parseInt(String(port ?? 3030), 10);
-  const listenPort = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3030;
+  const configPort = Number.parseInt(config?.web?.port, 10);
+  const listenPort = Number.isFinite(parsedPort) && parsedPort > 0
+    ? parsedPort
+    : Number.isFinite(configPort) && configPort > 0
+      ? configPort
+      : 3030;
   const providedHost = typeof host === "string" ? host.trim() : "";
-  const listenHost = providedHost
-    ? providedHost === "localhost"
+  const configHost = typeof config?.web?.host === "string" ? config.web.host.trim() : "";
+  const requestedHost = providedHost || configHost;
+  const listenHost = requestedHost
+    ? requestedHost === "localhost"
       ? "127.0.0.1"
-      : providedHost
+      : requestedHost
     : "0.0.0.0";
 
   const appConfig = getUiConfig({
