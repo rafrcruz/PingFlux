@@ -96,7 +96,6 @@ export function renderIndexPage(uiConfig, options = {}) {
             <div class="target-status-row">
               <select id="targetSelect" aria-label="Selecionar alvo de ping" disabled></select>
               <span id="pingModeIndicator" class="badge badge-mode" hidden>ICMP</span>
-              <span id="staleBadge" class="badge badge-stale" hidden>Desatualizado</span>
             </div>
           </label>
           <div class="control range-control" role="group" aria-label="Janela visual">

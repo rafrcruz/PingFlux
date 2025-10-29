@@ -34,6 +34,11 @@ const TRACEROUTE_MAX_AGE_MIN = toPositiveInt(
 );
 const EVENTS_LIMIT = 50;
 
+const LIVE_INACTIVITY_TIMEOUT_MS = toPositiveInt(
+  CONFIG.LIVE_INACTIVITY_TIMEOUT_MS ?? CONFIG.liveInactivityTimeoutMs,
+  15000
+);
+
 const RANGE_OPTIONS = [1, 5, 15, 60];
 const WINDOW_OPTION_MAP = new Map(
   RANGE_OPTIONS.map((minutes) => [minutes, minutes === 60 ? "60m" : `${minutes}m`])
@@ -142,7 +147,6 @@ const refs = {
   lastUpdate: document.getElementById("lastUpdate"),
   targetSelect: document.getElementById("targetSelect"),
   targetMode: document.getElementById("pingModeIndicator"),
-  staleBadge: document.getElementById("staleBadge"),
   rangeButtons: document.getElementById("rangeButtons"),
   pauseButton: document.getElementById("pauseStream"),
   resetZoom: document.getElementById("resetZoom"),
@@ -150,7 +154,6 @@ const refs = {
   tracerouteTimeline: document.getElementById("tracerouteTimeline"),
   tracerouteMeta: document.getElementById("tracerouteMeta"),
   tracerouteTrigger: document.getElementById("tracerouteTrigger"),
-  pageShell: document.querySelector(".page-shell"),
   networkStatusBar: document.getElementById("networkStatusBar"),
   networkStatusText: document.getElementById("networkStatusText"),
   heatmapPanel: document.querySelector("[data-heatmap-panel]"),
@@ -324,6 +327,7 @@ let reconnectTimer = null;
 let renderScheduled = false;
 let heatmapNeedsRefresh = false;
 let eventsRefreshTimer = null;
+let liveInactivityTimer = null;
 
 init();
 
@@ -879,6 +883,40 @@ function startEventsRefreshTimer() {
     }
   });
 }
+
+function clearLiveInactivityTimer() {
+  if (liveInactivityTimer) {
+    clearTimeout(liveInactivityTimer);
+    liveInactivityTimer = null;
+  }
+}
+
+function scheduleLiveInactivityTimer() {
+  clearLiveInactivityTimer();
+  if (!Number.isFinite(LIVE_INACTIVITY_TIMEOUT_MS) || LIVE_INACTIVITY_TIMEOUT_MS <= 0) {
+    return;
+  }
+  liveInactivityTimer = window.setTimeout(handleLiveInactivity, LIVE_INACTIVITY_TIMEOUT_MS);
+}
+
+function handleLiveInactivity() {
+  liveInactivityTimer = null;
+  if (state.connection !== "connected") {
+    return;
+  }
+  state.connection = "reconnecting";
+  updateConnectionStatus();
+  closeLiveStream();
+  scheduleReconnect();
+}
+
+function markLiveDataReceived() {
+  if (state.connection !== "connected") {
+    state.connection = "connected";
+    updateConnectionStatus();
+  }
+  scheduleLiveInactivityTimer();
+}
 function openLiveStream() {
   closeLiveStream();
   tryNextEndpoint(0);
@@ -909,6 +947,7 @@ function tryNextEndpoint(startIndex) {
       state.connectedEndpointIndex = index;
       state.reconnectAttempts = 0;
       updateConnectionStatus();
+      scheduleLiveInactivityTimer();
     };
 
     eventSource.onmessage = (event) => {
@@ -951,6 +990,7 @@ function scheduleReconnect() {
 }
 
 function closeLiveStream() {
+  clearLiveInactivityTimer();
   if (eventSource) {
     try {
       eventSource.close();
@@ -975,6 +1015,8 @@ function handleLivePayload(payload) {
   } else {
     state.hasPendingWhilePaused = true;
   }
+
+  markLiveDataReceived();
 
   const pingTargets = payload.ping ? Object.keys(payload.ping) : [];
   if (pingTargets.length) {
@@ -1070,25 +1112,6 @@ function updateTargetStatusDisplay() {
       refs.targetMode.removeAttribute("aria-label");
       refs.targetMode.classList.remove("badge-mode--tcp");
     }
-  }
-
-  if (refs.staleBadge) {
-    if (meta && meta.fresh === false && meta.ageMs != null) {
-      const seconds = Math.max(1, Math.floor(meta.ageMs / 1000));
-      refs.staleBadge.hidden = false;
-      refs.staleBadge.textContent = "⏱ Sem dados recentes";
-      refs.staleBadge.setAttribute("title", `Sem novas amostras há ${seconds}s.`);
-      refs.staleBadge.setAttribute("aria-label", `Sem novas amostras há ${seconds} segundos`);
-    } else {
-      refs.staleBadge.hidden = true;
-      refs.staleBadge.removeAttribute("title");
-      refs.staleBadge.removeAttribute("aria-label");
-    }
-  }
-
-  if (refs.pageShell) {
-    const isStale = Boolean(meta && meta.fresh === false);
-    refs.pageShell.classList.toggle("is-stale", isStale);
   }
 
   updateNetworkStatus();
@@ -1891,12 +1914,29 @@ function updateConnectionStatus() {
   if (!refs.connectionDot || !refs.connectionText) {
     return;
   }
+  const inactivityLimit =
+    Number.isFinite(LIVE_INACTIVITY_TIMEOUT_MS) && LIVE_INACTIVITY_TIMEOUT_MS > 0
+      ? LIVE_INACTIVITY_TIMEOUT_MS
+      : null;
+  const lastLiveTs =
+    Number.isFinite(state.lastUpdateTs) && state.lastUpdateTs > 0 ? state.lastUpdateTs : null;
+  const hasLiveData = lastLiveTs != null;
+  const hasFreshData =
+    hasLiveData && (!inactivityLimit || Date.now() - lastLiveTs <= inactivityLimit);
   let dotClass = "";
   let text = "";
   switch (state.connection) {
     case "connected":
-      dotClass = "";
-      text = "Atualizando ao vivo…";
+      if (!hasLiveData) {
+        dotClass = "status-dot--connecting";
+        text = "Conectando…";
+      } else if (!hasFreshData) {
+        dotClass = "status-dot--connecting";
+        text = "Reconectando…";
+      } else {
+        dotClass = "";
+        text = "Atualizando ao vivo…";
+      }
       break;
     case "reconnecting":
       dotClass = "status-dot--connecting";
