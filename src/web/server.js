@@ -1,4 +1,4 @@
-import http from "http";
+﻿import http from "http";
 import { runTraceroute } from "../collectors/traceroute.js";
 
 function sendJson(res, statusCode, payload) {
@@ -298,14 +298,14 @@ function renderIndexHtml(providedConfig) {
       <div class="alert" id="alert-box" role="status" aria-live="polite" style="display:none"></div>
       <section class="card">
         <div class="chart-container">
-          <svg id="chart" viewBox="0 0 600 320" role="img" aria-label="Gráfico de RTT"></svg>
+          <svg id="chart" viewBox="0 0 600 320" role="img" aria-label="GrÃ¡fico de RTT"></svg>
         </div>
       </section>
       <section class="card">
         <h2 style="margin-top:0">Resumo</h2>
         <div class="summary-grid">
           <div class="summary-item">
-            <div class="summary-label">Loss médio (%)</div>
+            <div class="summary-label">Loss mÃ©dio (%)</div>
             <div class="summary-value" id="summary-loss">--</div>
           </div>
           <div class="summary-item">
@@ -530,7 +530,7 @@ function renderIndexHtml(providedConfig) {
         alertBox.textContent = "";
       }
 
-      function showAlert(text) {
+        showAlert(\`Alerta: \${triggered.join(" e ")}.\`);
         if (!alertBox) {
           return;
         }
@@ -554,13 +554,21 @@ function renderIndexHtml(providedConfig) {
 
         if (latestP95 !== null && latestP95 > ALERT_P95_MS) {
           triggered.push(
-            `p95 ${formatNumberCompact(latestP95, 0)} ms (> ${formatNumberCompact(ALERT_P95_MS, 0)} ms)`
+            "p95 " +
+              formatNumberCompact(latestP95, 0) +
+              " ms (> " +
+              formatNumberCompact(ALERT_P95_MS, 0) +
+              " ms)"
           );
         }
 
         if (avgLoss !== null && avgLoss > ALERT_LOSS_PCT) {
           triggered.push(
-            `perda média ${formatNumberCompact(avgLoss, 2)}% (> ${formatNumberCompact(ALERT_LOSS_PCT, 2)}%)`
+            "perda media " +
+              formatNumberCompact(avgLoss, 2) +
+              "% (> " +
+              formatNumberCompact(ALERT_LOSS_PCT, 2) +
+              "%)"
           );
         }
 
@@ -569,7 +577,7 @@ function renderIndexHtml(providedConfig) {
           return;
         }
 
-        showAlert(`Alerta: ${triggered.join(" e ")}.`);
+        showAlert(\`Alerta: \${triggered.join(" e ")}.\`);
       }
 
       function renderSummary(rows) {
@@ -593,7 +601,7 @@ function renderIndexHtml(providedConfig) {
           text.setAttribute("y", "50%");
           text.setAttribute("dominant-baseline", "middle");
           text.setAttribute("text-anchor", "middle");
-          text.textContent = "Sem dados no período selecionado.";
+          text.textContent = "Sem dados no perÃ­odo selecionado.";
           chartSvg.appendChild(text);
           return;
         }
@@ -615,7 +623,7 @@ function renderIndexHtml(providedConfig) {
           text.setAttribute("y", "50%");
           text.setAttribute("dominant-baseline", "middle");
           text.setAttribute("text-anchor", "middle");
-          text.textContent = "Sem dados no período selecionado.";
+          text.textContent = "Sem dados no perÃ­odo selecionado.";
           chartSvg.appendChild(text);
           return;
         }
@@ -645,7 +653,7 @@ function renderIndexHtml(providedConfig) {
           text.setAttribute("y", "50%");
           text.setAttribute("dominant-baseline", "middle");
           text.setAttribute("text-anchor", "middle");
-          text.textContent = "Sem dados no período selecionado.";
+          text.textContent = "Sem dados no perÃ­odo selecionado.";
           chartSvg.appendChild(text);
           return;
         }
@@ -853,7 +861,7 @@ function renderIndexHtml(providedConfig) {
           updateQueryString(range, resolvedTarget);
 
           if (!rows || rows.length === 0) {
-            setMessage("Sem dados no período selecionado.", "muted");
+            setMessage("Sem dados no perÃ­odo selecionado.", "muted");
           } else {
             setMessage("");
           }
@@ -915,7 +923,7 @@ function renderIndexHtml(providedConfig) {
           const actionResult = await response.json();
           const rawId = actionResult?.id;
           if (rawId === null || rawId === undefined || rawId === "") {
-            throw new Error("Resposta inválida da ação de traceroute.");
+            throw new Error("Resposta invÃ¡lida da aÃ§Ã£o de traceroute.");
           }
 
           const id = String(rawId);
@@ -938,7 +946,7 @@ function renderIndexHtml(providedConfig) {
               resultPayload?.success === 1 ? "muted" : "error"
             );
           } else if (resultPayload?.success === 1) {
-            setTracerouteStatus("Traceroute concluído.", "muted");
+            setTracerouteStatus("Traceroute concluÃ­do.", "muted");
           } else {
             setTracerouteStatus("Traceroute finalizado com falha.", "error");
           }
@@ -1342,3 +1350,5 @@ export async function startServer({
     });
   });
 }
+
+
