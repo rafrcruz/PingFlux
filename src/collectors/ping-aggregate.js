@@ -261,24 +261,30 @@ function createWindowEntry({
   };
 
   if (!Number.isFinite(sent) || sent <= 0) {
-    return entry;
-  }
-
-  if (sent < minSamples) {
+    entry.loss_pct = 0;
+    entry.availability_pct = null;
     return entry;
   }
 
   const safeReceived = Number.isFinite(received) ? received : 0;
   const failures = Math.max(0, sent - safeReceived);
   const loss = (failures / sent) * 100;
+  entry.loss_pct = clampPercentage(loss);
+  if (entry.loss_pct == null) {
+    entry.loss_pct = 0;
+  }
+  entry.availability_pct = entry.loss_pct == null ? null : clampPercentage(100 - entry.loss_pct);
+
+  if (sent < minSamples) {
+    return entry;
+  }
+
   const safeLatencies = Array.isArray(latencies)
     ? latencies.filter((value) => Number.isFinite(value) && value > 0)
     : [];
   const sortedLatencies = safeLatencies.slice().sort((a, b) => a - b);
 
   entry.status = "ok";
-  entry.loss_pct = clampPercentage(loss);
-  entry.availability_pct = entry.loss_pct == null ? null : clampPercentage(100 - entry.loss_pct);
 
   if (sortedLatencies.length > 0) {
     const sum = sortedLatencies.reduce((acc, value) => acc + value, 0);
@@ -441,3 +447,4 @@ export function aggregateSince(sinceEpochMs) {
 
   return aggregateRange(since, now);
 }
+
