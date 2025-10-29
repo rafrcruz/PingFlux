@@ -87,7 +87,11 @@ export function renderIndexPage(uiConfig, options = {}) {
       <section class="controls" role="region" aria-label="Controles do dashboard">
         <label class="control select-control">
           <span class="control-label">Alvo de ping</span>
-          <select id="targetSelect" aria-label="Selecionar alvo de ping" disabled></select>
+          <div class="target-status-row">
+            <select id="targetSelect" aria-label="Selecionar alvo de ping" disabled></select>
+            <span id="pingModeIndicator" class="badge badge-mode" hidden>ICMP</span>
+            <span id="staleBadge" class="badge badge-stale" hidden>Desatualizado</span>
+          </div>
         </label>
         <div class="control range-control" role="group" aria-label="Janela visual">
           <span class="control-label">Janela visual</span>

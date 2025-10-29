@@ -1,6 +1,7 @@
 import { getConfig } from "../config/index.js";
 import { openDb, migrate, closeDb } from "../storage/db.js";
 import * as pingCollector from "../collectors/ping.js";
+import * as pingAggregator from "../collectors/ping-aggregate-loop.js";
 import * as dnsCollector from "../collectors/dns.js";
 import * as httpCollector from "../collectors/http.js";
 import { startServer } from "../web/server.js";
@@ -111,6 +112,7 @@ async function main() {
 
   const activeModules = {
     ping: startCollector("ping", pingCollector, enablePing),
+    "ping-agg": startCollector("ping-agg", pingAggregator, enablePing),
     dns: startCollector("dns", dnsCollector, enableDns),
     http: startCollector("http", httpCollector, enableHttp),
   };
