@@ -537,6 +537,7 @@ body {
   border-radius: 16px;
   border: 1px solid rgba(148, 163, 184, 0.1);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  position: relative;
 }
 
 .chart-large {
@@ -553,6 +554,25 @@ body {
 
 .chart-mini {
   min-height: 180px;
+}
+
+.chart-empty-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(6px);
+  padding: 0 16px;
+  pointer-events: none;
+}
+
+:root[data-theme="light"] .chart-empty-overlay {
+  background: rgba(248, 250, 252, 0.85);
 }
 
 .event-list {
@@ -666,6 +686,28 @@ body {
 .traceroute-hop .hop-rtt {
   color: var(--text-muted);
   font-size: 0.85rem;
+}
+
+.traceroute-collapsed {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 16px;
+  border: 1px dashed rgba(250, 204, 21, 0.45);
+  background: rgba(250, 204, 21, 0.08);
+  color: var(--warning);
+}
+
+.traceroute-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.traceroute-actions .primary-button,
+.traceroute-actions .ghost-button {
+  min-width: 160px;
 }
 
 .empty-state {

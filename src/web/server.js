@@ -152,9 +152,27 @@ const RANGE_TO_DURATION_MS = {
 };
 
 const RANGE_OPTIONS = Object.freeze(Object.keys(RANGE_TO_DURATION_MS));
-const UI_DEFAULT_TARGET = String(process.env.UI_DEFAULT_TARGET ?? "").trim();
+const FALLBACK_PING_TARGETS = ["3.174.59.117", "8.8.8.8", "1.1.1.1"];
+
+function parseTargetList(raw) {
+  if (typeof raw !== "string") {
+    return [];
+  }
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+const ENV_PING_TARGETS = parseTargetList(process.env.PING_TARGETS);
+const UI_DEFAULT_TARGET = ENV_PING_TARGETS[0] || FALLBACK_PING_TARGETS[0];
 const SPARKLINE_RANGE_OPTIONS = Object.freeze([5, 10, 15]);
 const HEALTH_WINDOW_OPTIONS = Object.freeze(["1m", "5m", "1h"]);
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function parseFiniteNumber(value) {
   const num = Number(value);
@@ -199,6 +217,11 @@ function describeWindowLabel(window) {
 
 const UI_SPARKLINE_MINUTES = parseSparklineMinutes(process.env.UI_SPARKLINE_MINUTES);
 const UI_SSE_RETRY_MS = parseRetryInterval(process.env.UI_SSE_RETRY_MS);
+const UI_EVENTS_DEDUP_MS = parsePositiveInt(process.env.UI_EVENTS_DEDUP_MS ?? process.env.EVENTS_DEDUP_MS, 30000);
+const UI_EVENTS_COOLDOWN_MS = parsePositiveInt(
+  process.env.UI_EVENTS_COOLDOWN_MS ?? process.env.EVENTS_COOLDOWN_MS,
+  10000
+);
 const THRESH_P95_WARN_MS = parseFiniteNumber(process.env.THRESH_P95_WARN_MS);
 const THRESH_P95_CRIT_MS = parseFiniteNumber(process.env.THRESH_P95_CRIT_MS);
 const THRESH_LOSS_WARN_PCT = parseFiniteNumber(process.env.THRESH_LOSS_WARN_PCT);
@@ -209,6 +232,10 @@ const THRESH_DNS_WARN_MS = parseFiniteNumber(process.env.THRESH_DNS_WARN_MS);
 const THRESH_DNS_CRIT_MS = parseFiniteNumber(process.env.THRESH_DNS_CRIT_MS);
 const HEALTH_EVAL_WINDOW = parseHealthWindow(process.env.HEALTH_EVAL_WINDOW);
 const HEALTH_REQUIRE_MIN_POINTS = parseMinPoints(process.env.HEALTH_REQUIRE_MIN_POINTS);
+const UI_TRACEROUTE_MAX_AGE_MIN = parsePositiveInt(
+  process.env.UI_TRACEROUTE_MAX_AGE_MIN ?? process.env.TRACEROUTE_MAX_AGE_MIN,
+  10
+);
 
 function buildThresholdPair(warn, crit) {
   return {
@@ -223,9 +250,34 @@ function getUiConfig(providedConfig) {
   const baseHealth = base.health && typeof base.health === "object" ? base.health : {};
   const healthWindow = parseHealthWindow(baseHealth.window ?? HEALTH_EVAL_WINDOW);
   const healthMinPoints = parseMinPoints(baseHealth.requireMinPoints ?? HEALTH_REQUIRE_MIN_POINTS);
+  const providedTargets = Array.isArray(base.targets) ? base.targets : [];
+  const normalizedTargets = providedTargets
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+  const requestedDefault = typeof base.defaultTarget === "string" ? base.defaultTarget.trim() : "";
+  const defaultTarget = requestedDefault || normalizedTargets[0] || UI_DEFAULT_TARGET || "";
+  const eventsDedupMs = parsePositiveInt(
+    base.eventsDedupMs ?? base.EVENTS_DEDUP_MS,
+    UI_EVENTS_DEDUP_MS
+  );
+  const eventsCooldownMs = parsePositiveInt(
+    base.eventsCooldownMs ?? base.EVENTS_COOLDOWN_MS,
+    UI_EVENTS_COOLDOWN_MS
+  );
+  const tracerouteMaxAgeMin = parsePositiveInt(
+    base.tracerouteMaxAgeMin ?? base.TRACEROUTE_MAX_AGE_MIN,
+    UI_TRACEROUTE_MAX_AGE_MIN
+  );
 
   return {
-    defaultTarget: typeof base.defaultTarget === "string" ? base.defaultTarget : UI_DEFAULT_TARGET,
+    defaultTarget,
+    DEFAULT_TARGET: defaultTarget,
+    eventsDedupMs,
+    EVENTS_DEDUP_MS: eventsDedupMs,
+    eventsCooldownMs,
+    EVENTS_COOLDOWN_MS: eventsCooldownMs,
+    tracerouteMaxAgeMin,
+    TRACEROUTE_MAX_AGE_MIN: tracerouteMaxAgeMin,
     sparklineMinutes: parseSparklineMinutes(base.sparklineMinutes ?? UI_SPARKLINE_MINUTES),
     sseRetryMs: parseRetryInterval(base.sseRetryMs ?? UI_SSE_RETRY_MS),
     rangeOptions: Array.from(SPARKLINE_RANGE_OPTIONS),
@@ -598,10 +650,21 @@ export async function startServer({
       : requestedHost
     : "0.0.0.0";
 
+  const configuredTargets = Array.isArray(config?.ping?.targets) ? config.ping.targets : [];
+  const normalizedTargets = configuredTargets
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+  const availableTargets = normalizedTargets.length ? normalizedTargets : FALLBACK_PING_TARGETS;
+  const defaultTarget = availableTargets[0] || UI_DEFAULT_TARGET;
+
   const appConfig = getUiConfig({
-    defaultTarget: UI_DEFAULT_TARGET,
+    defaultTarget,
+    targets: availableTargets,
     sparklineMinutes: UI_SPARKLINE_MINUTES,
     sseRetryMs: UI_SSE_RETRY_MS,
+    eventsDedupMs: UI_EVENTS_DEDUP_MS,
+    eventsCooldownMs: UI_EVENTS_COOLDOWN_MS,
+    tracerouteMaxAgeMin: UI_TRACEROUTE_MAX_AGE_MIN,
     thresholds: {
       p95: { warn: THRESH_P95_WARN_MS, crit: THRESH_P95_CRIT_MS },
       loss: { warn: THRESH_LOSS_WARN_PCT, crit: THRESH_LOSS_CRIT_PCT },

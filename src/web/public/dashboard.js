@@ -1,10 +1,28 @@
 const CONFIG = window.UI_CONFIG ?? {};
 const STRINGS = window.UI_STRINGS ?? {};
 
+function toPositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 const LIVE_ENDPOINTS = ["/v1/live/metrics", "/live/metrics"];
 const API_PING_WINDOW = ["/v1/api/ping/window", "/api/ping/window"];
 const API_TRACEROUTE_LATEST = ["/v1/api/traceroute/latest", "/api/traceroute/latest"];
 const API_TRACEROUTE_BY_ID = (id) => [`/v1/api/traceroute/${id}`, `/api/traceroute/${id}`];
+
+const DEFAULT_TARGET = typeof CONFIG.DEFAULT_TARGET === "string"
+  ? CONFIG.DEFAULT_TARGET
+  : typeof CONFIG.defaultTarget === "string"
+    ? CONFIG.defaultTarget
+    : "";
+const EVENTS_DEDUP_MS = toPositiveInt(CONFIG.EVENTS_DEDUP_MS ?? CONFIG.eventsDedupMs, 30000);
+const EVENTS_COOLDOWN_MS = toPositiveInt(CONFIG.EVENTS_COOLDOWN_MS ?? CONFIG.eventsCooldownMs, 10000);
+const TRACEROUTE_MAX_AGE_MIN = toPositiveInt(
+  CONFIG.TRACEROUTE_MAX_AGE_MIN ?? CONFIG.tracerouteMaxAgeMin,
+  10
+);
+const EVENTS_LIMIT = 50;
 
 const RANGE_OPTIONS = Array.isArray(CONFIG.rangeOptions) && CONFIG.rangeOptions.length
   ? CONFIG.rangeOptions
@@ -37,7 +55,7 @@ const state = {
   lastUpdateTs: null,
   visibleUpdateTs: null,
   targets: [],
-  selectedTarget: CONFIG.defaultTarget || "",
+  selectedTarget: DEFAULT_TARGET || "",
   paused: false,
   hasPendingWhilePaused: false,
   showLoss: true,
@@ -52,8 +70,13 @@ const state = {
   severities: new Map(),
   prevValues: new Map(),
   events: [],
+  eventKeyIndex: new Map(),
+  eventTypeIndex: new Map(),
   traceroute: null,
   tracerouteLoading: false,
+  tracerouteExpanded: false,
+  lossHasData: false,
+  lossUserToggled: false,
 };
 
 const refs = {
@@ -93,10 +116,13 @@ const charts = {
   httpTotal: null,
 };
 
+const chartOverlays = new Map();
+
 let eventSource = null;
 let reconnectTimer = null;
 let renderScheduled = false;
 let heatmapNeedsRefresh = false;
+let eventsRefreshTimer = null;
 
 init();
 
@@ -105,6 +131,7 @@ function init() {
   mountTheme();
   mountRangeButtons();
   mountControls();
+  initChartOverlays();
   initCharts();
   openLiveStream();
   if (state.selectedTarget) {
@@ -113,6 +140,7 @@ function init() {
   }
   updatePauseState();
   scheduleRender();
+  startEventsRefreshTimer();
 }
 
 function applyTooltips() {
@@ -122,6 +150,46 @@ function applyTooltips() {
       button.setAttribute("title", STRINGS[key]);
     }
   });
+}
+
+function initChartOverlays() {
+  [
+    "latencyChart",
+    "heatmapChart",
+    "dnsSparkline",
+    "httpTtfbSparkline",
+    "httpTotalSparkline",
+  ].forEach((id) => ensureChartOverlay(id));
+}
+
+function ensureChartOverlay(id) {
+  if (chartOverlays.has(id)) {
+    return;
+  }
+  const host = document.getElementById(id);
+  if (!host) {
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.className = "chart-empty-overlay";
+  overlay.textContent = "Sem dados no período";
+  overlay.setAttribute("role", "status");
+  overlay.hidden = true;
+  host.appendChild(overlay);
+  chartOverlays.set(id, overlay);
+}
+
+function setChartEmptyState(id, empty) {
+  const overlay = chartOverlays.get(id);
+  if (!overlay) {
+    return;
+  }
+  overlay.hidden = !empty;
+  if (empty) {
+    overlay.setAttribute("aria-hidden", "false");
+  } else {
+    overlay.setAttribute("aria-hidden", "true");
+  }
 }
 
 function mountTheme() {
@@ -171,6 +239,7 @@ function mountControls() {
     const value = refs.targetSelect.value;
     if (value && value !== state.selectedTarget) {
       state.selectedTarget = value;
+      state.tracerouteExpanded = false;
       fetchPingHistory(value).catch(() => {});
       fetchTraceroute(value).catch(() => {});
       scheduleRender();
@@ -188,6 +257,7 @@ function mountControls() {
   });
 
   refs.lossToggle?.addEventListener("change", () => {
+    state.lossUserToggled = true;
     state.showLoss = Boolean(refs.lossToggle?.checked);
     updateLatencySeriesVisibility();
   });
@@ -235,6 +305,17 @@ function initCharts() {
   configureSparkline(charts.httpTtfb, "#f97316");
   configureSparkline(charts.httpTotal, "#8b5cf6");
 
+  charts.latency?.on("legendselectchanged", (event) => {
+    if (!event || event.name !== "Perda (%)") {
+      return;
+    }
+    state.lossUserToggled = true;
+    state.showLoss = Boolean(event.selected?.["Perda (%)"]);
+    if (refs.lossToggle) {
+      refs.lossToggle.checked = state.showLoss;
+    }
+  });
+
   window.addEventListener("resize", () => {
     resizeCharts();
   });
@@ -265,19 +346,22 @@ function configureLatencyChart() {
       borderWidth: 0,
       textStyle: { color: "#e2e8f0" },
       formatter: (params) => {
-        const lines = [params[0]?.axisValueLabel ?? ""];
+        const axisLabel = params[0]?.axisValueLabel;
+        const lines = axisLabel ? [axisLabel] : [];
         params.forEach((serie) => {
-          if (!serie || serie.value == null) {
+          if (!serie) {
             return;
           }
-          let formatted = serie.value[1];
-          if (serie.seriesName.includes("Perda")) {
-            formatted = `${formatPercent(serie.value[1])}`;
-          } else {
-            formatted = `${formatMs(serie.value[1])}`;
+          const value = Array.isArray(serie.value) ? serie.value[1] : serie.value;
+          if (!Number.isFinite(value)) {
+            return;
           }
+          const formatted = serie.seriesName.includes("Perda") ? fmtPct(value) : fmtMs(value);
           lines.push(`${serie.marker} ${serie.seriesName}: ${formatted}`);
         });
+        if (lines.length === (axisLabel ? 1 : 0)) {
+          return STRINGS.noData || "Sem dados suficientes no período.";
+        }
         return lines.join("<br />");
       },
     },
@@ -297,10 +381,10 @@ function configureLatencyChart() {
         type: "value",
         name: "ms",
         nameTextStyle: { color: "var(--text-muted)" },
-        axisLabel: {
-          color: "var(--text-muted)",
-          formatter: (value) => `${Math.round(value)} ms`,
-        },
+      axisLabel: {
+        color: "var(--text-muted)",
+        formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)} ms` : value),
+      },
         splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.12)" } },
       },
       {
@@ -311,7 +395,7 @@ function configureLatencyChart() {
         max: 100,
         axisLabel: {
           color: "var(--text-muted)",
-          formatter: (value) => `${Math.round(value)}%`,
+          formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)}%` : value),
         },
         splitLine: { show: false },
       },
@@ -367,10 +451,10 @@ function configureHeatmap() {
     tooltip: {
       formatter: (params) => {
         if (!params || params.value == null) {
-          return "Sem dados";
+          return STRINGS.noData || "Sem dados suficientes no período.";
         }
         const [ts, , value, count] = params.value;
-        return `${formatTime(ts)}<br/>p95: ${formatMs(value)}<br/>Amostras: ${count ?? "n/d"}`;
+        return `${formatTime(ts)}<br/>p95: ${fmtMs(value)}<br/>Amostras: ${count ?? "n/d"}`;
       },
       backgroundColor: "rgba(15, 23, 42, 0.88)",
       borderWidth: 0,
@@ -416,10 +500,6 @@ function configureGauge() {
   if (!charts.availability) {
     return;
   }
-  const lossWarn = thresholds.loss?.warn ?? 1;
-  const lossCrit = thresholds.loss?.crit ?? 5;
-  const warnBoundary = clampGaugeValue(100 - lossWarn);
-  const critBoundary = clampGaugeValue(100 - lossCrit);
   charts.availability.setOption({
     series: [
       {
@@ -433,24 +513,25 @@ function configureGauge() {
           lineStyle: {
             width: 18,
             color: [
-              [critBoundary / 100, "#ef4444"],
-              [warnBoundary / 100, "#facc15"],
+              [0.95, "#ef4444"],
+              [0.99, "#facc15"],
               [1, "#22c55e"],
             ],
           },
         },
         pointer: {
           width: 6,
-          itemStyle: { color: "var(--text)" },
+          show: false,
+          itemStyle: { color: "#22c55e" },
         },
         axisTick: { show: false },
         splitLine: { length: 12, distance: 6, lineStyle: { color: "rgba(148,163,184,0.25)" } },
         axisLabel: { color: "var(--text-muted)", distance: 10, fontSize: 12 },
         detail: {
           fontSize: 30,
-          color: "var(--text)",
+          color: "#64748b",
           valueAnimation: true,
-          formatter: (value) => `${value.toFixed(1)}%`,
+          formatter: () => "—",
         },
         title: { show: false },
         data: [{ value: 0 }],
@@ -480,10 +561,11 @@ function configureSparkline(chart, color) {
       axisPointer: { type: "line" },
       formatter: (params) => {
         if (!params || !params.length) {
-          return "Sem dados";
+          return STRINGS.noData || "Sem dados suficientes no período.";
         }
         const item = params[0];
-        return `${formatTime(item.value[0])}<br/>${formatMs(item.value[1])}`;
+        const value = Array.isArray(item.value) ? item.value[1] : item.value;
+        return `${formatTime(item.value[0])}<br/>${fmtMs(value)}`;
       },
       backgroundColor: "rgba(15, 23, 42, 0.9)",
       borderWidth: 0,
@@ -505,6 +587,23 @@ function configureSparkline(chart, color) {
 function resizeCharts() {
   Object.values(charts).forEach((chart) => {
     chart?.resize({ animation: { duration: 200 } });
+  });
+}
+
+function startEventsRefreshTimer() {
+  if (eventsRefreshTimer) {
+    return;
+  }
+  eventsRefreshTimer = window.setInterval(() => {
+    if (state.events.length > 0) {
+      renderEvents();
+    }
+  }, 5000);
+  window.addEventListener("beforeunload", () => {
+    if (eventsRefreshTimer) {
+      clearInterval(eventsRefreshTimer);
+      eventsRefreshTimer = null;
+    }
   });
 }
 function openLiveStream() {
@@ -627,8 +726,9 @@ function updateTargets(targetList) {
   const sorted = Array.from(new Set(targetList)).sort();
   state.targets = sorted;
   if (!state.selectedTarget || !sorted.includes(state.selectedTarget)) {
-    const preferred = sorted.includes(CONFIG.defaultTarget) ? CONFIG.defaultTarget : sorted[0];
+    const preferred = sorted.includes(DEFAULT_TARGET) ? DEFAULT_TARGET : sorted[0];
     state.selectedTarget = preferred ?? "";
+    state.tracerouteExpanded = false;
     if (state.selectedTarget) {
       fetchPingHistory(state.selectedTarget).catch(() => {});
       fetchTraceroute(state.selectedTarget).catch(() => {});
@@ -684,9 +784,12 @@ function ingestDnsMetrics(dns, ts) {
     threshold: thresholds.dns,
     higherIsBad: true,
     trendKey: "dns-lookup",
-    subText: `5m: ${formatMs(entry.avg5m)}`,
+    subText: `5m: ${fmtMs(entry.avg5m)}`,
   });
-  updateEventsForMetric("dns", value, thresholds.dns, "DNS lookup elevado");
+  updateEventsForMetric("dns", value, thresholds.dns, "DNS lookup elevado", {
+    formatter: fmtMs,
+    eventType: "dns",
+  });
 }
 
 function ingestHttpMetrics(http, ts) {
@@ -705,9 +808,12 @@ function ingestHttpMetrics(http, ts) {
     threshold: thresholds.ttfb,
     higherIsBad: true,
     trendKey: "http-ttfb",
-    subText: `5m: ${formatMs(ttfbEntry.avg5m)}`,
+    subText: `5m: ${fmtMs(ttfbEntry.avg5m)}`,
   });
-  updateEventsForMetric("http-ttfb", ttfbValue, thresholds.ttfb, "TTFB elevado");
+  updateEventsForMetric("http-ttfb", ttfbValue, thresholds.ttfb, "TTFB elevado", {
+    formatter: fmtMs,
+    eventType: "http-ttfb",
+  });
 
   const totalValue = normalize(http.aggregate.total?.win1m_avg_ms);
   const totalEntry = {
@@ -721,7 +827,7 @@ function ingestHttpMetrics(http, ts) {
     threshold: thresholds.ttfb,
     higherIsBad: true,
     trendKey: "http-total",
-    subText: `5m: ${formatMs(totalEntry.avg5m)}`,
+    subText: `5m: ${fmtMs(totalEntry.avg5m)}`,
   });
 }
 function updateKpis(metrics, latestEntry) {
@@ -730,26 +836,26 @@ function updateKpis(metrics, latestEntry) {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-p95",
-    subText: `5m: ${formatMs(latestEntry.p95_5m)}`,
+    subText: `5m: ${fmtMs(latestEntry.p95_5m)}`,
   });
   updateKpi("ping-p50", latestEntry.p50, {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-p50",
-    subText: `5m: ${formatMs(latestEntry.p50_5m)}`,
+    subText: `5m: ${fmtMs(latestEntry.p50_5m)}`,
   });
   updateKpi("ping-avg", latestEntry.avg, {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-avg",
-    subText: `5m: ${formatMs(latestEntry.avg_5m)}`,
+    subText: `5m: ${fmtMs(latestEntry.avg_5m)}`,
   });
   updateKpi("ping-loss", loss, {
     threshold: thresholds.loss,
     higherIsBad: true,
     trendKey: "ping-loss",
-    formatter: formatPercent,
-    subText: `5m: ${formatPercent(latestEntry.loss_5m)}`,
+    formatter: fmtPct,
+    subText: `5m: ${fmtPct(latestEntry.loss_5m)}`,
   });
   const availability = loss == null ? null : clampGaugeValue(100 - loss);
   const availability5m = latestEntry.loss_5m == null ? null : clampGaugeValue(100 - latestEntry.loss_5m);
@@ -757,32 +863,71 @@ function updateKpis(metrics, latestEntry) {
     threshold: thresholds.loss,
     higherIsBad: false,
     trendKey: "ping-availability",
-    formatter: (value) => (value == null ? "—" : `${value.toFixed(1)}%`),
-    subText: `5m: ${availability5m == null ? "—" : `${availability5m.toFixed(1)}%`}`,
+    formatter: (value) => fmtPct(value),
+    subText: `5m: ${fmtPct(availability5m)}`,
   });
   updateGauge(availability);
 }
 
+function getAvailabilityColor(value) {
+  if (value == null || !Number.isFinite(value)) {
+    return "#64748b";
+  }
+  if (value >= 99) {
+    return "#22c55e";
+  }
+  if (value >= 95) {
+    return "#facc15";
+  }
+  if (value < 95) {
+    return "#ef4444";
+  }
+  return "#64748b";
+}
+
 function updateGauge(value) {
-  if (!charts.availability || value == null) {
+  if (!charts.availability) {
     return;
   }
-  charts.availability.setOption({ series: [{ data: [{ value }] }] });
+  const numeric = Number.isFinite(value) ? clampGaugeValue(value) : null;
+  const color = getAvailabilityColor(numeric);
+  const axisColor = numeric == null
+    ? [[1, "#475569"]]
+    : [
+        [0.95, "#ef4444"],
+        [0.99, "#facc15"],
+        [1, "#22c55e"],
+      ];
+  charts.availability.setOption({
+    series: [
+      {
+        data: [{ value: numeric ?? 0 }],
+        axisLine: { lineStyle: { color: axisColor } },
+        pointer: { show: numeric != null, itemStyle: { color } },
+        detail: {
+          color,
+          formatter: () => (numeric == null ? "—" : fmtPct(numeric)),
+        },
+      },
+    ],
+  });
 }
 
 function updateLatencySeriesVisibility() {
   if (!charts.latency) {
     return;
   }
+  const showLossSeries = state.lossHasData && state.showLoss;
   charts.latency.setOption({
     series: [
       {},
       {},
       {},
       {
-        show: state.showLoss,
+        show: showLossSeries,
       },
     ],
+    legend: { selected: { "Perda (%)": showLossSeries } },
   });
 }
 
@@ -791,8 +936,14 @@ function updateKpi(key, value, options = {}) {
   if (!card) {
     return;
   }
-  const formatter = options.formatter || formatMs;
-  card.valueEl.textContent = formatter(value);
+  const formatter = typeof options.formatter === "function" ? options.formatter : fmtMs;
+  const valueText = formatter(value);
+  card.valueEl.textContent = valueText;
+  if (valueText === "—") {
+    card.valueEl.setAttribute("title", STRINGS.noData || "Sem dados suficientes no período.");
+  } else {
+    card.valueEl.removeAttribute("title");
+  }
   if (card.subEl && options.subText) {
     card.subEl.textContent = options.subText;
   }
@@ -825,7 +976,7 @@ function updateKpi(key, value, options = {}) {
         message = `RTT p95 ${severity === "crit" ? "crítico" : "elevado"}: ${formatter(value)}`;
         break;
       case "ping-loss":
-        message = `Perda de pacotes ${severity === "crit" ? "crítica" : "alta"}: ${formatPercent(value)}`;
+        message = `Perda de pacotes ${severity === "crit" ? "crítica" : "alta"}: ${formatter(value)}`;
         break;
       case "ping-availability":
         message = `Disponibilidade em ${severity === "crit" ? "estado crítico" : "atenção"}: ${formatter(value)}`;
@@ -840,7 +991,7 @@ function updateKpi(key, value, options = {}) {
         break;
     }
     if (message) {
-      pushEvent({ severity, message, icon: "⚠" });
+      pushEvent({ key: `kpi-${key}-${severity}`, type: `kpi-${key}`, severity, message, icon: "⚠" });
     }
   }
 }
@@ -883,14 +1034,23 @@ function computeTrend(key, value, higherIsBad) {
 }
 
 function updateEventsFromPing(entry) {
-  updateEventsForMetric("ping-p95", entry.p95, thresholds.p95, "RTT p95 elevado");
-  updateEventsForMetric("ping-loss", entry.loss, thresholds.loss, "Perda elevada");
+  updateEventsForMetric("ping-p95", entry.p95, thresholds.p95, "RTT p95 elevado", {
+    formatter: fmtMs,
+    eventType: "ping",
+  });
+  updateEventsForMetric("ping-loss", entry.loss, thresholds.loss, "Perda elevada", {
+    formatter: fmtPct,
+    eventType: "ping-loss",
+    higherIsBad: true,
+  });
   if (Number.isFinite(entry.p95) && Number.isFinite(state.prevValues.get("ping-p95"))) {
     const previous = state.prevValues.get("ping-p95");
     if (entry.p95 > previous * 1.4 && entry.p95 - previous > 20) {
       pushEvent({
+        key: "ping-spike",
+        type: "ping",
         severity: "warn",
-        message: `Spike de RTT p95 (${formatMs(entry.p95)})`,
+        message: `Spike de RTT p95 (${fmtMs(entry.p95)})`,
         icon: "🚀",
       });
     }
@@ -898,11 +1058,21 @@ function updateEventsFromPing(entry) {
   state.prevValues.set("ping-p95", entry.p95);
 }
 
-function updateEventsForMetric(key, value, threshold, label) {
-  const severity = determineSeverity(value, threshold, true);
+function updateEventsForMetric(key, value, threshold, label, options = {}) {
+  const higherIsBad = options.higherIsBad !== false;
+  const severity = determineSeverity(value, threshold, higherIsBad);
   const prev = state.severities.get(key) || "ok";
   if (severityRank[severity] > severityRank[prev]) {
-    pushEvent({ severity, message: `${label}: ${formatValueByThreshold(value, threshold)}`, icon: "⚠" });
+    const formatter = typeof options.formatter === "function" ? options.formatter : fmtMs;
+    const eventKey = options.eventKey || `${key}_${severity}`;
+    const eventType = options.eventType || key;
+    pushEvent({
+      key: eventKey,
+      type: eventType,
+      severity,
+      message: `${label}: ${formatter(value)}`,
+      icon: options.icon || "⚠",
+    });
   }
 }
 
@@ -932,23 +1102,56 @@ function determineSeverity(value, threshold, higherIsBad = true) {
   return "ok";
 }
 
-function formatValueByThreshold(value, threshold) {
-  if (!threshold) {
-    return formatMs(value);
-  }
-  return formatMs(value);
-}
-
-function pushEvent({ severity = "ok", message, icon = "ℹ" }) {
+function pushEvent({ key, type, severity = "ok", message, icon = "ℹ" }) {
   if (!message) {
     return;
   }
-  const ts = Date.now();
-  state.events.unshift({ ts, severity, message, icon });
-  if (state.events.length > 10) {
-    state.events.length = 10;
+  const now = Date.now();
+  const eventKey = typeof key === "string" && key.length ? key : null;
+  const eventType = typeof type === "string" && type.length ? type : null;
+
+  if (eventKey) {
+    const lastAt = state.eventKeyIndex.get(eventKey);
+    if (lastAt && now - lastAt < EVENTS_DEDUP_MS) {
+      return;
+    }
   }
+
+  if (eventType) {
+    const lastTypeAt = state.eventTypeIndex.get(eventType);
+    if (lastTypeAt && now - lastTypeAt < EVENTS_COOLDOWN_MS) {
+      return;
+    }
+  }
+
+  const entry = { ts: now, severity, message, icon, key: eventKey, type: eventType };
+  state.events.unshift(entry);
+  if (eventKey) {
+    state.eventKeyIndex.set(eventKey, now);
+  }
+  if (eventType) {
+    state.eventTypeIndex.set(eventType, now);
+  }
+  if (state.events.length > EVENTS_LIMIT) {
+    state.events.length = EVENTS_LIMIT;
+  }
+  pruneEventIndexes(now);
   renderEvents();
+}
+
+function pruneEventIndexes(now) {
+  const dedupCutoff = now - EVENTS_DEDUP_MS;
+  const cooldownCutoff = now - EVENTS_COOLDOWN_MS;
+  for (const [eventKey, ts] of state.eventKeyIndex.entries()) {
+    if (!Number.isFinite(ts) || ts < dedupCutoff) {
+      state.eventKeyIndex.delete(eventKey);
+    }
+  }
+  for (const [eventType, ts] of state.eventTypeIndex.entries()) {
+    if (!Number.isFinite(ts) || ts < cooldownCutoff) {
+      state.eventTypeIndex.delete(eventType);
+    }
+  }
 }
 
 function renderEvents() {
@@ -1014,28 +1217,119 @@ function render() {
 
 function renderLatencyChart() {
   if (!charts.latency || !state.selectedTarget) {
+    setChartEmptyState("latencyChart", true);
     return;
   }
   const series = state.pingSeries.get(state.selectedTarget) || [];
   const cutoff = Date.now() - state.rangeMinutes * 60 * 1000;
   const filtered = series.filter((item) => item.ts >= cutoff);
-  const p50 = filtered.map((item) => [item.ts, item.p50 ?? null]);
-  const avg = filtered.map((item) => [item.ts, item.avg ?? null]);
-  const p95 = filtered.map((item) => [item.ts, item.p95 ?? null]);
-  const loss = filtered.map((item) => [item.ts, item.loss ?? null]);
+  const p50 = [];
+  const avg = [];
+  const p95 = [];
+  const loss = [];
+  const latencyValues = [];
+  const lossValues = [];
+
+  filtered.forEach((item) => {
+    if (Number.isFinite(item.p50)) {
+      p50.push([item.ts, item.p50]);
+      latencyValues.push(item.p50);
+    }
+    if (Number.isFinite(item.avg)) {
+      avg.push([item.ts, item.avg]);
+      latencyValues.push(item.avg);
+    }
+    if (Number.isFinite(item.p95)) {
+      p95.push([item.ts, item.p95]);
+      latencyValues.push(item.p95);
+    }
+    if (Number.isFinite(item.loss)) {
+      loss.push([item.ts, item.loss]);
+      lossValues.push(item.loss);
+    }
+  });
+
+  const hasLatencyData = latencyValues.length > 0;
+  const hasLossData = lossValues.length > 0;
+
+  if (!hasLatencyData && !hasLossData) {
+    setChartEmptyState("latencyChart", true);
+    charts.latency.setOption({
+      yAxis: [
+        { min: 0, max: 1 },
+        { min: 0, max: 1 },
+      ],
+      series: [
+        { data: [] },
+        { data: [] },
+        { data: [] },
+        { data: [], show: false },
+      ],
+    });
+    state.lossHasData = false;
+    updateLatencySeriesVisibility();
+    return;
+  }
+
+  setChartEmptyState("latencyChart", false);
+
+  let latMin = hasLatencyData ? Math.min(...latencyValues) : 0;
+  let latMax = hasLatencyData ? Math.max(...latencyValues) : 0;
+  let latMinDomain = Math.max(0, latMin * 0.9);
+  let latMaxDomain = latMax * 1.1;
+  if (!hasLatencyData || (latMin === 0 && latMax === 0)) {
+    latMinDomain = 0;
+    latMaxDomain = 1;
+  } else {
+    latMaxDomain = Math.max(latMaxDomain, latMinDomain + 1);
+  }
+
+  let lossMinDomain = 0;
+  let lossMaxDomain = 1;
+  if (hasLossData) {
+    const lossMin = Math.min(...lossValues);
+    const lossMax = Math.max(...lossValues);
+    lossMinDomain = Math.max(0, lossMin * 0.9);
+    lossMaxDomain = lossMax === 0 ? 1 : Math.min(100, lossMax * 1.1);
+    if (lossMin === 0 && lossMax === 0) {
+      lossMaxDomain = 1;
+    }
+  }
+
+  if (hasLossData && !state.lossHasData) {
+    state.lossHasData = true;
+    if (!state.lossUserToggled && refs.lossToggle) {
+      state.showLoss = true;
+      refs.lossToggle.checked = true;
+    }
+  }
+  if (!hasLossData && state.lossHasData) {
+    state.lossHasData = false;
+    if (!state.lossUserToggled && refs.lossToggle) {
+      refs.lossToggle.checked = false;
+    }
+  }
+
+  const showLossSeries = state.lossHasData && state.showLoss;
 
   charts.latency.setOption({
+    yAxis: [
+      { min: latMinDomain, max: latMaxDomain },
+      { min: lossMinDomain, max: lossMaxDomain },
+    ],
     series: [
       { data: p50 },
       { data: avg },
       { data: p95 },
-      { data: loss, show: state.showLoss },
+      { data: loss, show: showLossSeries },
     ],
+    legend: { selected: { "Perda (%)": showLossSeries } },
   });
 }
 
 function renderHeatmap() {
   if (!charts.heatmap || !state.selectedTarget) {
+    setChartEmptyState("heatmapChart", true);
     return;
   }
   const series = state.pingSeries.get(state.selectedTarget) || [];
@@ -1046,6 +1340,7 @@ function renderHeatmap() {
       const normalizedIndex = bucketIndex === -1 ? HEAT_BUCKETS.length : bucketIndex;
       return [item.ts, normalizedIndex, item.p95, item.samples];
     });
+  setChartEmptyState("heatmapChart", data.length === 0);
   charts.heatmap.setOption({
     series: [{ data }],
   });
@@ -1055,7 +1350,13 @@ function renderSparkline(chart, list) {
   if (!chart) {
     return;
   }
-  const data = list.map((item) => [item.ts, item.value ?? null]);
+  const data = list
+    .filter((item) => Number.isFinite(item.value))
+    .map((item) => [item.ts, item.value]);
+  const id = chart.getDom()?.id;
+  if (id) {
+    setChartEmptyState(id, data.length === 0);
+  }
   chart.setOption({ series: [{ data }] });
 }
 
@@ -1134,6 +1435,7 @@ async function fetchPingHistory(target) {
 async function fetchTraceroute(target) {
   if (!target) {
     state.traceroute = null;
+    state.tracerouteExpanded = false;
     renderTraceroute();
     return;
   }
@@ -1143,12 +1445,18 @@ async function fetchTraceroute(target) {
     if (!response.ok) {
       if (response.status === 404) {
         state.traceroute = null;
+        state.tracerouteExpanded = false;
         renderTraceroute();
         return;
       }
       throw new Error(`HTTP ${response.status}`);
     }
     const data = await response.json();
+    const isNewResult =
+      !state.traceroute || state.traceroute.id !== data.id || state.traceroute.ts !== data.ts;
+    if (isNewResult) {
+      state.tracerouteExpanded = !isTracerouteStale(data);
+    }
     state.traceroute = data;
     renderTraceroute();
   } catch (error) {
@@ -1170,7 +1478,63 @@ function renderTraceroute() {
     refs.tracerouteMeta.textContent = "Sem execuções";
     return;
   }
-  refs.tracerouteMeta.textContent = `Executado há ${formatRelative(traceroute.ts)}`;
+  const ageMs = Date.now() - Number(traceroute.ts);
+  const isStale = Number.isFinite(ageMs) && ageMs > TRACEROUTE_MAX_AGE_MIN * 60 * 1000;
+  if (!isStale) {
+    state.tracerouteExpanded = true;
+  }
+  const ageLabel = Number.isFinite(ageMs) ? formatAgeHhMm(ageMs) : "--:--";
+  refs.tracerouteMeta.textContent = isStale
+    ? `resultado antigo (${ageLabel} atrás)`
+    : `Executado há ${formatRelative(traceroute.ts)}`;
+
+  const shouldCollapse = isStale && !state.tracerouteExpanded;
+  if (shouldCollapse) {
+    const notice = document.createElement("div");
+    notice.className = "traceroute-collapsed";
+    const message = document.createElement("p");
+    message.textContent = "Resultado antigo oculto. Você pode executar novamente ou visualizar os hops anteriores.";
+    const actions = document.createElement("div");
+    actions.className = "traceroute-actions";
+    const rerunButton = document.createElement("button");
+    rerunButton.type = "button";
+    rerunButton.className = "primary-button traceroute-rerun";
+    rerunButton.textContent = state.tracerouteLoading ? "Executando…" : "Rodar novamente";
+    rerunButton.disabled = state.tracerouteLoading;
+    rerunButton.addEventListener("click", () => {
+      if (!state.selectedTarget || state.tracerouteLoading) {
+        return;
+      }
+      triggerTraceroute(state.selectedTarget).catch(() => {});
+    });
+    const expandButton = document.createElement("button");
+    expandButton.type = "button";
+    expandButton.className = "ghost-button";
+    expandButton.textContent = "Ver hops antigos";
+    expandButton.addEventListener("click", () => {
+      state.tracerouteExpanded = true;
+      renderTraceroute();
+    });
+    actions.append(rerunButton, expandButton);
+    notice.append(message, actions);
+    refs.tracerouteTimeline.appendChild(notice);
+    return;
+  }
+
+  const allNoResponse = traceroute.success === 0 && traceroute.hops.every((hop) => {
+    const addr = hop?.address;
+    const rtts = Array.isArray(hop?.rtt) ? hop.rtt.filter((value) => Number.isFinite(Number(value))) : [];
+    return (!addr || addr === "*") && rtts.length === 0;
+  });
+
+  if (allNoResponse) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "Sem resposta dos hops";
+    refs.tracerouteTimeline.appendChild(empty);
+    return;
+  }
+
   traceroute.hops.forEach((hop, index) => {
     const item = document.createElement("div");
     const success = hop && hop.success !== false;
@@ -1185,7 +1549,7 @@ function renderTraceroute() {
     const rtt = document.createElement("span");
     rtt.className = "hop-rtt";
     const rtts = Array.isArray(hop?.rtt) ? hop.rtt.filter((value) => Number.isFinite(Number(value))) : [];
-    const rttText = rtts.length ? rtts.map((value) => `${Number(value).toFixed(1)} ms`).join(" · ") : "sem resposta";
+    const rttText = rtts.length ? rtts.map((value) => fmtMs(Number(value))).join(" · ") : "sem resposta";
     rtt.textContent = rttText;
     info.append(addr, rtt);
     item.append(indexEl, info);
@@ -1198,6 +1562,7 @@ async function triggerTraceroute(target) {
     refs.tracerouteTrigger.disabled = true;
     refs.tracerouteTrigger.textContent = "Executando…";
   }
+  renderTraceroute();
   try {
     const response = await fetch("/actions/traceroute", {
       method: "POST",
@@ -1213,6 +1578,7 @@ async function triggerTraceroute(target) {
     } else {
       await fetchTraceroute(target);
     }
+    state.tracerouteExpanded = true;
     pushEvent({ severity: "ok", message: `Traceroute para ${target} executado`, icon: "🛰" });
   } catch (error) {
     console.error("Falha ao executar traceroute:", error);
@@ -1223,6 +1589,7 @@ async function triggerTraceroute(target) {
       refs.tracerouteTrigger.disabled = false;
       refs.tracerouteTrigger.textContent = "Rodar novamente";
     }
+    renderTraceroute();
   }
 }
 
@@ -1234,6 +1601,11 @@ async function fetchTracerouteById(id) {
         continue;
       }
       const data = await response.json();
+      const isNewResult =
+        !state.traceroute || state.traceroute.id !== data.id || state.traceroute.ts !== data.ts;
+      if (isNewResult) {
+        state.tracerouteExpanded = !isTracerouteStale(data);
+      }
       state.traceroute = data;
       renderTraceroute();
       return;
@@ -1276,27 +1648,51 @@ function normalize(value) {
   return Number.isFinite(num) ? num : null;
 }
 
-function formatMs(value) {
-  if (value == null || !Number.isFinite(value)) {
-    return "—";
+const numberFormatters = new Map();
+
+function getNumberFormatter(digits) {
+  const key = Math.max(0, digits);
+  if (!numberFormatters.has(key)) {
+    numberFormatters.set(
+      key,
+      new Intl.NumberFormat("pt-BR", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: key,
+      })
+    );
   }
-  if (value >= 1000) {
-    return `${value.toFixed(0)} ms`;
-  }
-  if (value >= 100) {
-    return `${value.toFixed(1)} ms`;
-  }
-  if (value >= 10) {
-    return `${value.toFixed(1)} ms`;
-  }
-  return `${value.toFixed(2)} ms`;
+  return numberFormatters.get(key);
 }
 
-function formatPercent(value) {
-  if (value == null || !Number.isFinite(value)) {
+function fmtNumber(value, digits = 1) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
     return "—";
   }
-  return `${value.toFixed(value < 10 ? 2 : 1)}%`;
+  const abs = Math.abs(num);
+  let decimals = Math.max(0, Math.floor(digits));
+  if (abs >= 1000) {
+    decimals = 0;
+  } else if (abs >= 100) {
+    decimals = Math.min(decimals, 0);
+  } else if (abs >= 10) {
+    decimals = Math.min(decimals, Math.max(1, decimals));
+  } else if (abs >= 1) {
+    decimals = Math.min(Math.max(decimals, 1), 2);
+  } else {
+    decimals = Math.min(Math.max(decimals, 2), 3);
+  }
+  return getNumberFormatter(decimals).format(num);
+}
+
+function fmtMs(value, digits = 1) {
+  const text = fmtNumber(value, digits);
+  return text === "—" ? text : `${text} ms`;
+}
+
+function fmtPct(value, digits = 1) {
+  const text = fmtNumber(value, digits);
+  return text === "—" ? text : `${text}%`;
 }
 
 function formatTime(ts) {
@@ -1330,6 +1726,21 @@ function formatRelative(ts) {
   }
   const days = Math.round(hours / 24);
   return `há ${days}d`;
+}
+
+function formatAgeHhMm(ms) {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function isTracerouteStale(result) {
+  if (!result || result.ts == null) {
+    return false;
+  }
+  const ageMs = Date.now() - Number(result.ts);
+  return Number.isFinite(ageMs) && ageMs > TRACEROUTE_MAX_AGE_MIN * 60 * 1000;
 }
 
 function hexToRgba(hex, alpha) {
