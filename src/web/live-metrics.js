@@ -1,21 +1,15 @@
 import { EventEmitter } from "events";
 import { getRuntimeStateSnapshot as getPingRuntimeState } from "../collectors/ping.js";
+import {
+  getTargetSnapshot as getRealtimeWindowSnapshot,
+  getAllTargets as getRealtimeWindowTargets,
+  getWindowDefinitions as getRealtimeWindowDefinitions,
+  isEnabled as realtimeWindowsEnabled,
+} from "../runtime/windows.js";
+import * as logger from "../utils/logger.js";
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
-const WINDOWS = [
-  { key: "win1m", duration: MINUTE_MS },
-  { key: "win5m", duration: 5 * MINUTE_MS },
-  { key: "win15m", duration: 15 * MINUTE_MS },
-  { key: "win60m", duration: HOUR_MS },
-];
-const WINDOW_KEY_TO_TABLE = Object.freeze({
-  win1m: "ping_window_1m",
-  win5m: "ping_window_5m",
-  win15m: "ping_window_15m",
-  win60m: "ping_window_60m",
-});
-const PING_WINDOW_TABLES = Object.freeze(Object.values(WINDOW_KEY_TO_TABLE));
 
 function computePercentile(values, percentile) {
   if (!values || values.length === 0) {
@@ -69,33 +63,7 @@ function clampPercentage(value) {
   return num;
 }
 
-function preparePingWindowRecentStatements(db) {
-  const map = new Map();
-  for (const table of PING_WINDOW_TABLES) {
-    map.set(
-      table,
-      db.prepare(
-        `SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms, availability_pct, status FROM ${table} WHERE ts_min >= ? ORDER BY ts_min ASC`
-      )
-    );
-  }
-  return map;
-}
-
-function getWindowStatement(map, table) {
-  if (!map) {
-    return null;
-  }
-  if (map instanceof Map) {
-    return map.get(table) ?? null;
-  }
-  if (typeof map === "object" && map !== null) {
-    return map[table] ?? null;
-  }
-  return null;
-}
-
-function extractPingTargets({ configTargets, rawTargets, windowTargets }) {
+function extractPingTargets({ configTargets, runtimeTargets, windowTargets }) {
   const targets = new Set();
   if (Array.isArray(configTargets)) {
     for (const target of configTargets) {
@@ -105,9 +73,9 @@ function extractPingTargets({ configTargets, rawTargets, windowTargets }) {
       }
     }
   }
-  for (const target of rawTargets ?? []) {
+  for (const target of runtimeTargets ?? []) {
     if (target) {
-      targets.add(target);
+      targets.add(String(target));
     }
   }
   for (const target of windowTargets ?? []) {
@@ -118,216 +86,111 @@ function extractPingTargets({ configTargets, rawTargets, windowTargets }) {
   return Array.from(targets).sort();
 }
 
-function groupRowsByTarget(rows, mapper) {
-  const map = new Map();
-  if (!Array.isArray(rows)) {
-    return map;
-  }
-  for (const row of rows) {
-    if (!row) {
-      continue;
-    }
-    const target = mapper(row);
-    if (!target) {
-      continue;
-    }
-    let list = map.get(target);
-    if (!list) {
-      list = [];
-      map.set(target, list);
-    }
-    list.push(row);
-  }
-  return map;
-}
-
-function computePingWindowMetrics({
-  now,
-  duration,
-  rawEntries,
-  successEntries,
-  aggregateEntries,
-  useWindows,
-}) {
-  const cutoff = now - duration;
-  const result = {
-    avg_ms: null,
-    p95_ms: null,
-    p50_ms: null,
-    loss_pct: null,
-    availability_pct: null,
-    samples: 0,
-    status: "insufficient",
-  };
-
-  if (useWindows && Array.isArray(aggregateEntries) && aggregateEntries.length > 0) {
-    const latest = aggregateEntries[aggregateEntries.length - 1];
-    const status =
-      typeof latest?.status === "string" && latest.status.trim().length ? latest.status : "ok";
-    result.status = status;
-    result.samples = Number.isFinite(Number(latest?.sent)) ? Number(latest.sent) : 0;
-    if (status === "ok") {
-      result.avg_ms = normalizeNumber(latest?.avg_ms);
-      result.p50_ms = normalizeNumber(latest?.p50_ms);
-      result.p95_ms = normalizeNumber(latest?.p95_ms);
-      result.loss_pct = clampPercentage(latest?.loss_pct);
-      result.availability_pct = clampPercentage(
-        latest?.availability_pct ?? (result.loss_pct == null ? null : 100 - result.loss_pct)
-      );
-    }
-    return result;
-  }
-
-  const relevantRaw = rawEntries.filter((entry) => entry.ts >= cutoff);
-  const samples = relevantRaw.length;
-  result.samples = samples;
-  if (samples === 0) {
-    return result;
-  }
-
-  const successValues = relevantRaw.filter((entry) => entry.success && Number.isFinite(entry.rtt));
-  const successCount = successValues.length;
-  if (successCount > 0) {
-    const latencies = successValues.map((entry) => entry.rtt);
-    result.avg_ms = average(latencies);
-    result.p50_ms = computePercentile(latencies, 0.5);
-    result.p95_ms = computePercentile(latencies, 0.95);
-  }
-
-  result.loss_pct = clampPercentage(((samples - successCount) / samples) * 100);
-  if (!Number.isFinite(result.avg_ms ?? NaN)) {
-    result.avg_ms = null;
-  }
-  if (!Number.isFinite(result.p50_ms ?? NaN)) {
-    result.p50_ms = null;
-  }
-  if (!Number.isFinite(result.p95_ms ?? NaN)) {
-    result.p95_ms = null;
-  }
-  result.availability_pct = clampPercentage(
-    result.loss_pct == null ? null : 100 - result.loss_pct
-  );
-  result.status = "ok";
-
-  return result;
-}
-
 function computePingMetrics({
-  now,
-  configTargets,
-  useWindows,
-  lastSampleStmt,
-  recentStmt,
-  successStmt,
-  windowStmts,
-  runtimeState,
-  staleThresholdMs,
-}) {
-  const since = now - HOUR_MS;
-  const rawRows = recentStmt ? recentStmt.all(since) : [];
-  const successRows = successStmt ? successStmt.all(since) : [];
-  const windowRowsByKey = new Map();
-  const aggregatedTargets = new Set();
-  if (useWindows && windowStmts) {
-    const cutoffMinute = Math.floor(since / MINUTE_MS) * MINUTE_MS;
-    for (const window of WINDOWS) {
-      const table = WINDOW_KEY_TO_TABLE[window.key];
-      const stmt = getWindowStatement(windowStmts, table);
-      const rows = stmt ? stmt.all(cutoffMinute) : [];
-      const grouped = groupRowsByTarget(rows, (row) => row.target);
-      windowRowsByKey.set(window.key, grouped);
-      for (const targetKey of grouped.keys()) {
-        aggregatedTargets.add(targetKey);
-      }
-    }
+function buildWindowEntries(windowDefs, snapshot) {
+  const entries = {};
+  for (const def of windowDefs) {
+    const windowMetrics = snapshot?.windows?.[def.id] ?? null;
+    const count = Number.isFinite(windowMetrics?.count)
+      ? Math.max(0, Number(windowMetrics.count))
+      : 0;
+    const loss = clampPercentage(windowMetrics?.loss_pct);
+    const availability = clampPercentage(
+      windowMetrics?.disponibilidade_pct ?? windowMetrics?.availability_pct ?? (loss == null ? null : 100 - loss)
+    );
+
+    entries[def.id] = {
+      count,
+      p50_ms: normalizeNumber(windowMetrics?.p50_ms),
+      p95_ms: normalizeNumber(windowMetrics?.p95_ms),
+      avg_ms: normalizeNumber(windowMetrics?.avg_ms),
+      loss_pct: loss,
+      disponibilidade_pct: availability,
+      availability_pct: availability,
+      status: count > 0 ? "ok" : "insufficient",
+    };
   }
+  return entries;
+}
 
-  const rawByTarget = groupRowsByTarget(rawRows, (row) => row.target);
-  const successByTarget = groupRowsByTarget(successRows, (row) => row.target);
-
+function computePingMetrics({ now, configTargets, runtimeState, staleThresholdMs, windowDefs }) {
+  const windowEnabled = realtimeWindowsEnabled();
+  const windowTargets = windowEnabled ? getRealtimeWindowTargets() : [];
+  const runtimeStateMap = runtimeState && typeof runtimeState === "object" ? runtimeState : {};
+  const runtimeTargets = Object.keys(runtimeStateMap);
   const targets = extractPingTargets({
     configTargets,
-    rawTargets: rawByTarget.keys(),
-    windowTargets: aggregatedTargets.values(),
+    runtimeTargets,
+    windowTargets,
   });
 
   const payload = {};
   const staleLimit = Number.isFinite(staleThresholdMs) ? Math.max(0, staleThresholdMs) : 10000;
-  const runtimeStateMap = runtimeState && typeof runtimeState === "object" ? runtimeState : {};
 
   for (const target of targets) {
-    const lastRow = lastSampleStmt ? lastSampleStmt.get(target) : null;
-    const lastSample = {
-      rtt_ms: null,
-      up: 0,
-      ts: null,
-    };
-    if (lastRow) {
-      const ts = Number(lastRow.ts);
-      lastSample.ts = Number.isFinite(ts) ? ts : null;
-      const success = Number(lastRow.success) === 1;
-      lastSample.up = success ? 1 : 0;
-      const rtt = normalizeNumber(lastRow.rtt_ms);
-      lastSample.rtt_ms = success ? rtt : null;
-    }
+    const snapshot = windowEnabled
+      ? getRealtimeWindowSnapshot(target, { now })
+      : { windows: {}, recent: [], latestTs: null };
 
-    const rawEntries = (rawByTarget.get(target) || []).map((row) => ({
-      ts: Number(row.ts),
-      success: Number(row.success) === 1,
-      rtt: normalizeNumber(row.rtt_ms),
-    }));
-    const successEntries = (successByTarget.get(target) || []).map((row) => ({
-      ts: Number(row.ts),
-      rtt: normalizeNumber(row.rtt_ms),
-    }));
+    const recent = Array.isArray(snapshot?.recent)
+      ? snapshot.recent
+          .map((entry) => {
+            const ts = Number(entry?.ts);
+            if (!Number.isFinite(ts)) {
+              return null;
+            }
+            const success = Boolean(entry?.success);
+            const rttValue = Number(entry?.rtt_ms);
+            return {
+              ts,
+              success,
+              rtt_ms: success && Number.isFinite(rttValue) ? rttValue : null,
+            };
+          })
+          .filter(Boolean)
+      : [];
 
-    const windowsPayload = {};
-    for (const window of WINDOWS) {
-      const aggregateGroup = windowRowsByKey.get(window.key);
-      const aggregateEntries = aggregateGroup ? aggregateGroup.get(target) || [] : [];
-      windowsPayload[window.key] = computePingWindowMetrics({
-        now,
-        duration: window.duration,
-        rawEntries,
-        successEntries,
-        aggregateEntries,
-        useWindows,
-      });
-    }
-
-    const runtimeInfo = runtimeStateMap[target] ?? null;
-    const runtimeLastTs = Number.isFinite(runtimeInfo?.lastSampleTs)
-      ? Number(runtimeInfo.lastSampleTs)
-      : null;
-    const sampleTs = Number.isFinite(lastSample.ts) ? Number(lastSample.ts) : null;
-    const latestTs = [runtimeLastTs, sampleTs].filter((value) => Number.isFinite(value));
-    const resolvedTs = latestTs.length > 0 ? Math.max(...latestTs) : null;
-    const ageMs = resolvedTs != null ? Math.max(0, now - resolvedTs) : null;
-    // Freshness flag used by the UI to highlight stale data.
-    const fresh = ageMs == null ? false : ageMs <= staleLimit;
-    const pingMode =
-      typeof runtimeInfo?.mode === "string" && runtimeInfo.mode ? runtimeInfo.mode : null;
-    const runtimeCounters = runtimeInfo
+    const lastEntry = recent.length > 0 ? recent[recent.length - 1] : null;
+    const lastSample = lastEntry
       ? {
-          consecutiveFailures: Number.isFinite(runtimeInfo.consecutiveFailures)
-            ? Number(runtimeInfo.consecutiveFailures)
-            : 0,
-          consecutiveSuccesses: Number.isFinite(runtimeInfo.consecutiveSuccesses)
-            ? Number(runtimeInfo.consecutiveSuccesses)
-            : 0,
+          ts: lastEntry.ts,
+          up: lastEntry.success ? 1 : 0,
+          rtt_ms: lastEntry.success ? lastEntry.rtt_ms : null,
         }
       : null;
 
+    const runtimeInfo = runtimeStateMap[target] ?? null;
+    const runtimeTs = Number.isFinite(runtimeInfo?.lastSampleTs)
+      ? Number(runtimeInfo.lastSampleTs)
+      : null;
+    const snapshotTs = Number.isFinite(snapshot?.latestTs) ? Number(snapshot.latestTs) : null;
+    const resolvedTsCandidates = [runtimeTs, snapshotTs].filter((value) => Number.isFinite(value));
+    const resolvedTs = resolvedTsCandidates.length > 0 ? Math.max(...resolvedTsCandidates) : null;
+    const ageMs = resolvedTs != null ? Math.max(0, now - resolvedTs) : null;
+    const fresh = ageMs != null ? ageMs <= staleLimit : false;
+
+    const windowsPayload = buildWindowEntries(windowDefs, snapshot);
+
     const entry = {
+      schema: "1.1.0",
+      target,
+      windows: windowsPayload,
+      recent,
       lastSample,
-      ...windowsPayload,
       fresh,
       age_ms: ageMs,
-      pingMode,
+      mode: typeof runtimeInfo?.mode === "string" && runtimeInfo.mode ? runtimeInfo.mode : null,
     };
 
-    if (runtimeCounters) {
-      entry.state = runtimeCounters;
+    if (runtimeInfo) {
+      entry.state = {
+        consecutiveFailures: Number.isFinite(runtimeInfo.consecutiveFailures)
+          ? Number(runtimeInfo.consecutiveFailures)
+          : 0,
+        consecutiveSuccesses: Number.isFinite(runtimeInfo.consecutiveSuccesses)
+          ? Number(runtimeInfo.consecutiveSuccesses)
+          : 0,
+      };
     }
 
     payload[target] = entry;
@@ -453,7 +316,6 @@ class LiveMetricsBroadcaster extends EventEmitter {
     this.config = config ?? {};
     const interval = Number(this.config.pushIntervalMs ?? 2000);
     this.intervalMs = Number.isFinite(interval) && interval > 0 ? interval : 2000;
-    this.useWindows = Boolean(this.config.useWindows);
     this.pingTargets = Array.isArray(this.config.pingTargets) ? this.config.pingTargets : [];
     this.staleThresholdMs =
       Number.isFinite(this.config.staleMs) && this.config.staleMs >= 0
@@ -464,6 +326,12 @@ class LiveMetricsBroadcaster extends EventEmitter {
     this.runtimeStateProvider = getPingRuntimeState;
 
     this.statements = this.prepareStatements();
+    this.windowDefinitions = getRealtimeWindowDefinitions();
+
+    const windowSummary = realtimeWindowsEnabled()
+      ? this.windowDefinitions.map((def) => def.id).join("/") || "none"
+      : "disabled";
+    logger.info("live", `push every ${this.intervalMs}ms, windows: ${windowSummary}`);
   }
 
   prepareStatements() {
@@ -471,16 +339,6 @@ class LiveMetricsBroadcaster extends EventEmitter {
       return {};
     }
     return {
-      pingLastSample: this.db.prepare(
-        "SELECT ts, success, rtt_ms FROM ping_sample WHERE target = ? ORDER BY ts DESC LIMIT 1"
-      ),
-      pingRecent: this.db.prepare(
-        "SELECT ts, target, rtt_ms, success FROM ping_sample WHERE ts >= ? ORDER BY ts ASC"
-      ),
-      pingSuccessRecent: this.db.prepare(
-        "SELECT ts, target, rtt_ms FROM ping_sample WHERE success = 1 AND ts >= ? ORDER BY ts ASC"
-      ),
-      pingWindowTables: preparePingWindowRecentStatements(this.db),
       dnsRecent: this.db.prepare(
         "SELECT ts, lookup_ms, lookup_ms_hot, lookup_ms_cold, success, success_hot, success_cold FROM dns_sample WHERE ts >= ? ORDER BY ts ASC"
       ),
@@ -651,13 +509,9 @@ class LiveMetricsBroadcaster extends EventEmitter {
     const ping = computePingMetrics({
       now,
       configTargets: this.pingTargets,
-      useWindows: this.useWindows,
-      lastSampleStmt: this.statements.pingLastSample,
-      recentStmt: this.statements.pingRecent,
-      successStmt: this.statements.pingSuccessRecent,
-      windowStmts: this.statements.pingWindowTables,
       runtimeState,
       staleThresholdMs: this.staleThresholdMs,
+      windowDefs: this.windowDefinitions,
     });
 
     const dnsRows = this.statements.dnsRecent ? this.statements.dnsRecent.all(now - HOUR_MS) : [];
