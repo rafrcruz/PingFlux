@@ -1,12 +1,12 @@
 const DEFAULT_TOOLTIPS = Object.freeze({
-  pingP95: "95% das amostras têm RTT ≤ este valor; sensível a picos.",
-  pingP50: "RTT p50: mediana do RTT para o alvo no último minuto.",
-  pingAvg: "RTT médio no último minuto.",
-  pingLoss: "% de pacotes sem resposta na janela.",
-  pingAvailability: "100 - perda; visão geral da estabilidade.",
-  dnsLookup: "Tempo médio de resolução DNS no último minuto.",
-  httpTtfb: "TTFB médio (1m): tempo até o primeiro byte nas verificações HTTP.",
-  httpTotal: "Tempo total médio (1m) das verificações HTTP.",
+  pingP95: "95% das amostras na janela visual têm RTT ≤ este valor.",
+  pingP50: "Mediana do RTT considerando apenas a janela visual.",
+  pingAvg: "RTT médio dentro da janela visual escolhida.",
+  pingLoss: "% de pacotes sem resposta na janela selecionada.",
+  pingAvailability: "100 - perda dentro da mesma janela visual.",
+  dnsLookup: "Tempo médio de resolução DNS na janela visual.",
+  httpTtfb: "TTFB médio observado recentemente (até 60m).",
+  httpTotal: "Tempo total médio observado recentemente (até 60m).",
   noData: "Sem dados suficientes no período.",
 });
 
@@ -19,14 +19,8 @@ function serializeConfig(config) {
     .replace(/\u2029/g, "\\u2029");
 }
 
-function resolveRangeOptions(config) {
-  const defaults = [5, 10, 15, 30];
-  const provided = Array.isArray(config?.rangeOptions) ? config.rangeOptions : [];
-  const values = provided
-    .map((value) => Number.parseInt(value, 10))
-    .filter((value) => Number.isFinite(value) && value > 0);
-  const merged = [...new Set([...defaults, ...values])].sort((a, b) => a - b);
-  return merged.length ? merged : defaults;
+function resolveRangeOptions() {
+  return [1, 5, 15, 60];
 }
 
 export function renderIndexPage(uiConfig, options = {}) {
@@ -37,7 +31,7 @@ export function renderIndexPage(uiConfig, options = {}) {
       : DEFAULT_TOOLTIPS;
   const encodedConfig = serializeConfig({
     ...resolvedConfig,
-    rangeOptions: resolveRangeOptions(resolvedConfig),
+    rangeOptions: resolveRangeOptions(),
   });
   const encodedTooltips = serializeConfig(tooltips);
   const faviconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="%2338bdf8"/><stop offset="100%" stop-color="%2334d399"/></linearGradient></defs><rect width="64" height="64" rx="12" fill="%230b1120"/><path d="M8 34c6 0 6-18 12-18s6 32 12 32 6-44 12-44 6 38 12 38" fill="none" stroke="url(%23g)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -92,6 +86,7 @@ export function renderIndexPage(uiConfig, options = {}) {
           <time id="lastUpdate" class="last-update" datetime="">Última atualização: —</time>
         </div>
         <section class="controls" role="region" aria-label="Controles do dashboard">
+          <!-- A janela visual selecionada abaixo atualiza KPIs, gráfico principal e severidade -->
           <label class="control select-control">
             <span class="control-label">Alvo de ping</span>
             <div class="target-status-row">
@@ -118,7 +113,7 @@ export function renderIndexPage(uiConfig, options = {}) {
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M4 19h16M4 14l4-4 4 4 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
                 </span>
                 <div>
-                  <span class="kpi-title">RTT p95 (1m)</span>
+                  <span class="kpi-title">RTT p95</span>
                   <button class="kpi-help" type="button" data-tooltip="pingP95" aria-label="Ajuda RTT p95">?</button>
                 </div>
               </div>
@@ -128,9 +123,6 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
-            <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-p95">Sem dados no período</span>
-            </div>
           </article>
 
           <article class="kpi-card" data-kpi="ping-p50" data-loading="true">
@@ -140,7 +132,7 @@ export function renderIndexPage(uiConfig, options = {}) {
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M4 17l6-6 4 4 6-10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
                 </span>
                 <div>
-                  <span class="kpi-title">RTT p50 (1m)</span>
+                  <span class="kpi-title">RTT p50</span>
                   <button class="kpi-help" type="button" data-tooltip="pingP50" aria-label="Ajuda RTT p50">?</button>
                 </div>
               </div>
@@ -150,9 +142,6 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
-            <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-p50">Sem dados no período</span>
-            </div>
           </article>
 
           <article class="kpi-card" data-kpi="ping-avg" data-loading="true">
@@ -162,7 +151,7 @@ export function renderIndexPage(uiConfig, options = {}) {
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M4 13l4-6 4 3 4-7 4 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
                 </span>
                 <div>
-                  <span class="kpi-title">RTT médio (1m)</span>
+                  <span class="kpi-title">RTT médio</span>
                   <button class="kpi-help" type="button" data-tooltip="pingAvg" aria-label="Ajuda RTT médio">?</button>
                 </div>
               </div>
@@ -172,9 +161,6 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
-            <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-avg">Sem dados no período</span>
-            </div>
           </article>
 
           <article class="kpi-card" data-kpi="ping-loss" data-loading="true">
@@ -194,9 +180,6 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
-            <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-loss">Sem dados no período</span>
-            </div>
           </article>
 
           <article class="kpi-card" data-kpi="ping-availability" data-loading="true">
@@ -216,9 +199,6 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
-            <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="ping-availability">Sem dados no período</span>
-            </div>
           </article>
 
           <article class="kpi-card" data-kpi="dns-lookup" data-loading="true">
@@ -238,9 +218,6 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
-            <div class="kpi-foot">
-              <span class="kpi-sub" data-sub="dns-lookup">Sem dados no período</span>
-            </div>
           </article>
         </div>
       </section>
@@ -252,21 +229,17 @@ export function renderIndexPage(uiConfig, options = {}) {
 
       <main class="dashboard-layout" id="dashboardRoot">
         <section class="panel panel-large trend-panel" aria-label="Tendência de latência e perda">
-          <div class="panel-header">
-            <h2>Latência e perda</h2>
-            <div class="panel-actions">
-              <label class="checkbox">
-                <input type="checkbox" id="lossToggle" checked aria-label="Alternar série de perda" />
-                <span>Exibir perda (%)</span>
-              </label>
-              <button id="resetZoom" class="ghost-button" type="button">Reset zoom</button>
+            <div class="panel-header">
+              <h2>Latência e perda</h2>
+              <div class="panel-actions">
+                <button id="resetZoom" class="ghost-button" type="button">Reset zoom</button>
+              </div>
             </div>
-          </div>
           <div id="latencyChart" class="chart chart-large" role="img" aria-label="Gráfico de RTT"></div>
         </section>
 
         <div class="detail-grid" role="region" aria-label="Detalhes complementares">
-          <section class="panel panel-medium" aria-label="Heatmap RTT">
+          <section class="panel panel-medium" aria-label="Heatmap RTT" data-heatmap-panel>
             <div class="panel-header">
               <h2>Heatmap RTT p95</h2>
             </div>
@@ -275,7 +248,8 @@ export function renderIndexPage(uiConfig, options = {}) {
 
           <section class="panel panel-gauge" aria-label="Disponibilidade">
             <div class="panel-header">
-              <h2>Disponibilidade (1m)</h2>
+              <h2>Disponibilidade</h2>
+              <span class="panel-subtitle" data-window-label="availability">Janela atual</span>
             </div>
             <div id="availabilityGauge" class="chart chart-gauge" role="img" aria-label="Gauge de disponibilidade"></div>
           </section>
@@ -283,7 +257,7 @@ export function renderIndexPage(uiConfig, options = {}) {
           <section class="panel panel-mini" aria-label="DNS Lookup">
             <div class="panel-header">
               <h2>DNS Lookup</h2>
-              <span class="panel-subtitle">Últimos 60 min</span>
+              <span class="panel-subtitle" data-window-label="dns">Janela atual</span>
             </div>
             <div id="dnsSparkline" class="chart chart-mini" role="img" aria-label="Série de lookup DNS"></div>
           </section>

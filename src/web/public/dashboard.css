@@ -83,15 +83,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: clamp(18px, 3vw, 28px);
-  padding: clamp(24px, 4vw, 40px);
+  padding: clamp(18px, 3vw, 28px);
   border-radius: var(--radius-lg);
   background: linear-gradient(145deg, rgba(88, 166, 255, 0.12), transparent 60%), var(--bg-card-soft);
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-lg);
-  position: sticky;
-  top: 16px;
-  z-index: 20;
-  backdrop-filter: blur(16px);
 }
 
 /* Hero reorganizado para destacar título e estado em tempo real */
@@ -153,8 +149,8 @@ body {
 
 .toggle-theme {
   position: relative;
-  width: 52px;
-  height: 52px;
+  width: 44px;
+  height: 44px;
   border-radius: 16px;
   border: 1px solid var(--border-strong);
   background: var(--bg-card);
@@ -561,19 +557,6 @@ body {
   letter-spacing: 0.08em;
 }
 
-.kpi-foot {
-  margin-top: auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.82rem;
-  color: var(--text-muted);
-}
-
-.kpi-sub {
-  position: relative;
-}
-
 .kpi-trend {
   display: flex;
   align-items: center;
@@ -712,14 +695,7 @@ body {
 .diagnostics-grid {
   display: grid;
   gap: var(--grid-gap);
-  grid-template-columns: repeat(1, minmax(0, 1fr));
-}
-
-@media (min-width: 992px) {
-  .detail-grid,
-  .diagnostics-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
 .panel {
@@ -763,6 +739,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 12px;
+  justify-content: flex-end;
 }
 
 .checkbox {
@@ -810,6 +787,10 @@ body {
   color: var(--text-muted);
   background: var(--overlay);
   border-radius: var(--radius-sm);
+}
+
+[data-heatmap-panel][hidden] {
+  display: none !important;
 }
 
 .event-list {

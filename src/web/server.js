@@ -151,9 +151,14 @@ function readJsonBody(req, maxBytes = 256 * 1024) {
   });
 }
 
+const MINUTE_MS = 60 * 1000;
 const RANGE_TO_DURATION_MS = {
-  "1h": 60 * 60 * 1000,
-  "6h": 6 * 60 * 60 * 1000,
+  "1m": MINUTE_MS,
+  "5m": 5 * MINUTE_MS,
+  "15m": 15 * MINUTE_MS,
+  "60m": 60 * MINUTE_MS,
+  "1h": 60 * MINUTE_MS,
+  "6h": 6 * 60 * MINUTE_MS,
   "24h": 24 * 60 * 60 * 1000,
 };
 
@@ -192,6 +197,25 @@ function parseSparklineMinutes(value) {
 function parseRetryInterval(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 3000;
+}
+
+function parseBooleanFlag(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+  return Boolean(fallback);
 }
 
 function parseHealthWindow(value) {
@@ -287,6 +311,10 @@ function getUiConfig(providedConfig) {
     UI_TRACEROUTE_MAX_AGE_MIN
   );
   const ewmaAlpha = parseAlpha(base.uiEwmaAlpha ?? base.UI_EWMA_ALPHA ?? UI_EWMA_ALPHA);
+  const heatmapEnabled = parseBooleanFlag(
+    base.UI_ENABLE_HEATMAP ?? base.enableHeatmap ?? process.env.UI_ENABLE_HEATMAP,
+    false
+  );
 
   return {
     defaultTarget,
@@ -302,6 +330,7 @@ function getUiConfig(providedConfig) {
     rangeOptions: Array.from(SPARKLINE_RANGE_OPTIONS),
     uiEwmaAlpha: ewmaAlpha,
     UI_EWMA_ALPHA: ewmaAlpha,
+    UI_ENABLE_HEATMAP: heatmapEnabled,
     thresholds: {
       p95: buildThresholdPair(
         thresholds.p95?.warn ?? THRESH_P95_WARN_MS,
@@ -330,12 +359,113 @@ function getUiConfig(providedConfig) {
 
 function resolveRangeWindow(rawRange) {
   const normalized = typeof rawRange === "string" ? rawRange.trim().toLowerCase() : "";
-  const rangeKey = RANGE_TO_DURATION_MS[normalized] ? normalized : "1h";
+  const rangeKey = RANGE_TO_DURATION_MS[normalized] ? normalized : "60m";
   const durationMs = RANGE_TO_DURATION_MS[rangeKey];
   const nowMs = Date.now();
   const fromMs = nowMs - durationMs;
 
-  return { fromMs, toMs: nowMs };
+  return { fromMs, toMs: nowMs, rangeKey, durationMs };
+}
+
+function normalizeNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function computePercentile(values, percentile) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return null;
+  }
+  const sorted = values
+    .map((value) => Number(value))
+    .filter((num) => Number.isFinite(num))
+    .sort((a, b) => a - b);
+  if (sorted.length === 0) {
+    return null;
+  }
+  const position = (sorted.length - 1) * percentile;
+  const lowerIndex = Math.floor(position);
+  const upperIndex = Math.ceil(position);
+  const lowerValue = sorted[lowerIndex];
+  const upperValue = sorted[upperIndex];
+  if (lowerIndex === upperIndex) {
+    return lowerValue;
+  }
+  const weight = position - lowerIndex;
+  return lowerValue + (upperValue - lowerValue) * weight;
+}
+
+function computePingWindowSummary(samples, aggregates) {
+  const result = {
+    win_p95_ms: null,
+    win_p50_ms: null,
+    win_avg_ms: null,
+    win_loss_pct: null,
+    win_samples: 0,
+  };
+
+  const safeSamples = Array.isArray(samples) ? samples : [];
+  const safeAggregates = Array.isArray(aggregates) ? aggregates : [];
+
+  const successLatencies = safeSamples
+    .filter((row) => Number(row.success) === 1)
+    .map((row) => normalizeNumber(row.rtt_ms))
+    .filter((value) => value != null);
+
+  if (successLatencies.length > 0) {
+    result.win_p95_ms = computePercentile(successLatencies, 0.95);
+    result.win_p50_ms = computePercentile(successLatencies, 0.5);
+    const sum = successLatencies.reduce((acc, value) => acc + value, 0);
+    result.win_avg_ms = sum / successLatencies.length;
+  }
+
+  let totalSent = 0;
+  let totalReceived = 0;
+  let weightedLatencySum = 0;
+  let weightedLatencyCount = 0;
+
+  for (const row of safeAggregates) {
+    const sent = Number(row?.sent);
+    const received = Number(row?.received);
+    if (Number.isFinite(sent)) {
+      totalSent += sent;
+    }
+    if (Number.isFinite(received)) {
+      totalReceived += received;
+    }
+    const avgValue = normalizeNumber(row?.avg_ms);
+    if (avgValue != null && Number.isFinite(received) && received > 0) {
+      weightedLatencySum += avgValue * received;
+      weightedLatencyCount += received;
+    }
+  }
+
+  if (weightedLatencyCount > 0) {
+    result.win_avg_ms = weightedLatencySum / weightedLatencyCount;
+  }
+
+  if (totalSent > 0) {
+    const effectiveReceived = Number.isFinite(totalReceived) ? totalReceived : 0;
+    result.win_loss_pct = ((totalSent - effectiveReceived) / totalSent) * 100;
+    result.win_samples = totalSent;
+  } else {
+    result.win_samples = successLatencies.length;
+  }
+
+  if (!Number.isFinite(result.win_loss_pct)) {
+    result.win_loss_pct = null;
+  }
+  if (!Number.isFinite(result.win_avg_ms)) {
+    result.win_avg_ms = null;
+  }
+  if (!Number.isFinite(result.win_p50_ms)) {
+    result.win_p50_ms = null;
+  }
+  if (!Number.isFinite(result.win_p95_ms)) {
+    result.win_p95_ms = null;
+  }
+
+  return result;
 }
 
 function createRequestHandler(db, appConfig, options = {}) {
@@ -347,6 +477,12 @@ function createRequestHandler(db, appConfig, options = {}) {
         ),
         pingWindowByTarget: db.prepare(
           "SELECT ts_min, target, sent, received, loss_pct, avg_ms, p50_ms, p95_ms, stdev_ms FROM ping_window_1m WHERE ts_min BETWEEN ? AND ? AND target = ? ORDER BY ts_min ASC"
+        ),
+        pingSamplesByTargetRange: db.prepare(
+          "SELECT ts, target, rtt_ms, success FROM ping_sample WHERE ts BETWEEN ? AND ? AND target = ? ORDER BY ts ASC"
+        ),
+        pingSamplesRangeAll: db.prepare(
+          "SELECT ts, target, rtt_ms, success FROM ping_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
         ),
         dnsSamplesAll: db.prepare(
           "SELECT ts, hostname, resolver, lookup_ms, success FROM dns_sample WHERE ts BETWEEN ? AND ? ORDER BY ts ASC"
@@ -573,24 +709,81 @@ function createRequestHandler(db, appConfig, options = {}) {
         return;
       }
 
-      const { fromMs, toMs } = resolveRangeWindow(parsedUrl.searchParams.get("range"));
+      const { fromMs, toMs, rangeKey, durationMs } = resolveRangeWindow(
+        parsedUrl.searchParams.get("range")
+      );
       const rawTarget = parsedUrl.searchParams.get("target");
       const target = typeof rawTarget === "string" ? rawTarget.trim() : "";
 
       try {
+        if (method === "HEAD") {
+          sendJson(res, 200, { ok: true }, { method });
+          return;
+        }
+
         if (target) {
-          const rows = statements.pingWindowByTarget.all(fromMs, toMs, target);
-          sendJson(res, 200, rows, { method });
+          const aggregates = statements.pingWindowByTarget.all(fromMs, toMs, target);
+          const sampleRows = statements.pingSamplesByTargetRange
+            ? statements.pingSamplesByTargetRange.all(fromMs, toMs, target)
+            : [];
+          const samples = sampleRows.map((row) => ({
+            ts: Number(row.ts),
+            target: row.target,
+            success: Number(row.success) === 1,
+            rtt_ms: normalizeNumber(row.rtt_ms),
+          }));
+          const summary = computePingWindowSummary(samples, aggregates);
+          sendJson(
+            res,
+            200,
+            {
+              target,
+              range: rangeKey,
+              windowMs: durationMs,
+              summary,
+              aggregates,
+              samples,
+            },
+            { method }
+          );
         } else {
-          const rows = statements.pingWindowAll.all(fromMs, toMs);
-          const grouped = Object.create(null);
-          for (const row of rows) {
-            if (!grouped[row.target]) {
-              grouped[row.target] = [];
+          const aggregates = statements.pingWindowAll.all(fromMs, toMs);
+          const aggregateByTarget = new Map();
+          for (const row of aggregates) {
+            if (!aggregateByTarget.has(row.target)) {
+              aggregateByTarget.set(row.target, []);
             }
-            grouped[row.target].push(row);
+            aggregateByTarget.get(row.target).push(row);
           }
-          sendJson(res, 200, grouped, { method });
+          const sampleRows = statements.pingSamplesRangeAll
+            ? statements.pingSamplesRangeAll.all(fromMs, toMs)
+            : [];
+          const samplesByTarget = new Map();
+          for (const row of sampleRows) {
+            if (!samplesByTarget.has(row.target)) {
+              samplesByTarget.set(row.target, []);
+            }
+            samplesByTarget.get(row.target).push({
+              ts: Number(row.ts),
+              target: row.target,
+              success: Number(row.success) === 1,
+              rtt_ms: normalizeNumber(row.rtt_ms),
+            });
+          }
+
+          const response = Object.create(null);
+          for (const [entryTarget, list] of aggregateByTarget.entries()) {
+            const samples = samplesByTarget.get(entryTarget) ?? [];
+            response[entryTarget] = {
+              target: entryTarget,
+              range: rangeKey,
+              windowMs: durationMs,
+              summary: computePingWindowSummary(samples, list),
+              aggregates: list,
+              samples,
+            };
+          }
+          sendJson(res, 200, response, { method });
         }
       } catch (error) {
         sendJson(res, 500, { error: error?.message ?? "Query failed" }, { method });

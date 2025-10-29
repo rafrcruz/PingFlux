@@ -34,15 +34,54 @@ const TRACEROUTE_MAX_AGE_MIN = toPositiveInt(
 );
 const EVENTS_LIMIT = 50;
 
-const RANGE_OPTIONS =
-  Array.isArray(CONFIG.rangeOptions) && CONFIG.rangeOptions.length
-    ? CONFIG.rangeOptions
-    : [5, 10, 15, 30];
-const MAX_RANGE_MINUTES = RANGE_OPTIONS.reduce((max, value) => (value > max ? value : max), 30);
+const RANGE_OPTIONS = [1, 5, 15, 60];
+const WINDOW_OPTION_MAP = new Map(
+  RANGE_OPTIONS.map((minutes) => [minutes, minutes === 60 ? "win60m" : `win${minutes}m`])
+);
+const MAX_RANGE_MINUTES = RANGE_OPTIONS.reduce((max, value) => (value > max ? value : max), 60);
 const HISTORY_LIMIT_MS = MAX_RANGE_MINUTES * 60 * 1000;
 const DNS_HISTORY_LIMIT_MS = 60 * 60 * 1000;
 
 const thresholds = CONFIG.thresholds ?? {};
+const HEATMAP_ENABLED = Boolean(CONFIG.UI_ENABLE_HEATMAP);
+
+function getWindowKeyFromMinutes(minutes) {
+  const normalized = Number(minutes);
+  return WINDOW_OPTION_MAP.get(normalized) ?? "win1m";
+}
+
+function getRangeParamFromMinutes(minutes) {
+  const normalized = Number(minutes);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return "1m";
+  }
+  return normalized === 60 ? "60m" : `${normalized}m`;
+}
+
+function formatWindowLabel(minutes) {
+  const normalized = Number(minutes);
+  if (!Number.isFinite(normalized) || normalized <= 0) {
+    return "1m";
+  }
+  return `${normalized}m`;
+}
+
+function getWindowKeyFromRange(range) {
+  if (typeof range !== "string") {
+    return "win1m";
+  }
+  const normalized = range.trim().toLowerCase();
+  if (normalized === "60m" || normalized === "1h") {
+    return "win60m";
+  }
+  if (normalized === "15m") {
+    return "win15m";
+  }
+  if (normalized === "5m") {
+    return "win5m";
+  }
+  return "win1m";
+}
 
 const severityRank = { ok: 0, warn: 1, crit: 2 };
 const HEAT_BUCKETS = [0, 50, 100, 150, 200, 300, 500, 800, 1200];
@@ -69,12 +108,13 @@ const state = {
   selectedTarget: DEFAULT_TARGET || "",
   paused: false,
   hasPendingWhilePaused: false,
-  showLoss: true,
-  rangeMinutes: RANGE_OPTIONS.includes(Number(CONFIG.sparklineMinutes))
-    ? Number(CONFIG.sparklineMinutes)
-    : RANGE_OPTIONS[RANGE_OPTIONS.length - 1],
-  pingSeries: new Map(),
+  rangeMinutes: RANGE_OPTIONS[0],
+  pingAggregates: new Map(),
+  pingSamples: new Map(),
+  windowSummaries: new Map(),
+  latestSampleTs: new Map(),
   dnsSeries: [],
+  dnsLatest: null,
   httpTtfbSeries: [],
   httpTotalSeries: [],
   trends: new Map(),
@@ -86,8 +126,6 @@ const state = {
   traceroute: null,
   tracerouteLoading: false,
   tracerouteExpanded: false,
-  lossHasData: false,
-  lossUserToggled: false,
   targetIndicators: new Map(),
 };
 
@@ -101,7 +139,6 @@ const refs = {
   staleBadge: document.getElementById("staleBadge"),
   rangeButtons: document.getElementById("rangeButtons"),
   pauseButton: document.getElementById("pauseStream"),
-  lossToggle: document.getElementById("lossToggle"),
   resetZoom: document.getElementById("resetZoom"),
   eventList: document.getElementById("eventList"),
   tracerouteTimeline: document.getElementById("tracerouteTimeline"),
@@ -112,13 +149,20 @@ const refs = {
   networkStatusText: document.getElementById("networkStatusText"),
 };
 
+const windowLabelRefs = new Map();
+document.querySelectorAll("[data-window-label]").forEach((node) => {
+  const key = node.getAttribute("data-window-label");
+  if (key) {
+    windowLabelRefs.set(key, node);
+  }
+});
+
 const kpiCards = Array.from(document.querySelectorAll(".kpi-card")).map((card) => {
   const key = card.getAttribute("data-kpi");
   return {
     key,
     element: card,
     valueEl: card.querySelector("[data-value]"),
-    subEl: card.querySelector(`[data-sub="${key}"]`),
     trendEl: card.querySelector(".trend-label"),
     arrowEl: card.querySelector(".trend-arrow"),
   };
@@ -212,11 +256,12 @@ function init() {
   mountTheme();
   mountRangeButtons();
   mountControls();
+  applyHeatmapVisibility();
   initChartOverlays();
   initCharts();
   openLiveStream();
   if (state.selectedTarget) {
-    fetchPingHistory(state.selectedTarget).catch(() => {});
+    bootstrapTargetData(state.selectedTarget).catch(() => {});
     fetchTraceroute(state.selectedTarget).catch(() => {});
   }
   updatePauseState();
@@ -232,6 +277,14 @@ function applyTooltips() {
       button.setAttribute("title", STRINGS[key]);
     }
   });
+}
+
+function applyHeatmapVisibility() {
+  const panel = document.querySelector("[data-heatmap-panel]");
+  if (!panel) {
+    return;
+  }
+  panel.hidden = !HEATMAP_ENABLED;
 }
 
 function initChartOverlays() {
@@ -306,13 +359,27 @@ function mountRangeButtons() {
     button.textContent = `${minutes}m`;
     button.setAttribute("aria-pressed", minutes === state.rangeMinutes ? "true" : "false");
     button.addEventListener("click", () => {
+      if (state.rangeMinutes === minutes) {
+        return;
+      }
       state.rangeMinutes = minutes;
+      updateWindowLabels();
       Array.from(refs.rangeButtons.querySelectorAll("button")).forEach((btn) => {
         btn.setAttribute("aria-pressed", btn === button ? "true" : "false");
       });
-      scheduleRender();
+      onWindowRangeChanged().catch(() => {});
     });
     refs.rangeButtons.appendChild(button);
+  });
+  updateWindowLabels();
+}
+
+function updateWindowLabels() {
+  const label = formatWindowLabel(state.rangeMinutes);
+  windowLabelRefs.forEach((node) => {
+    if (node) {
+      node.textContent = `Janela atual · ${label}`;
+    }
   });
 }
 
@@ -322,7 +389,7 @@ function mountControls() {
     if (value && value !== state.selectedTarget) {
       state.selectedTarget = value;
       state.tracerouteExpanded = false;
-      fetchPingHistory(value).catch(() => {});
+      bootstrapTargetData(value).catch(() => {});
       fetchTraceroute(value).catch(() => {});
       scheduleRender();
       updateTargetStatusDisplay();
@@ -337,12 +404,6 @@ function mountControls() {
       state.hasPendingWhilePaused = false;
       scheduleRender();
     }
-  });
-
-  refs.lossToggle?.addEventListener("change", () => {
-    state.lossUserToggled = true;
-    state.showLoss = Boolean(refs.lossToggle?.checked);
-    updateLatencySeriesVisibility();
   });
 
   refs.resetZoom?.addEventListener("click", () => {
@@ -369,6 +430,36 @@ function updatePauseState() {
     refs.pauseButton.classList.remove("paused");
   }
 }
+
+async function onWindowRangeChanged() {
+  const target = state.selectedTarget;
+  if (target) {
+    const rangeParam = getRangeParamFromMinutes(state.rangeMinutes);
+    try {
+      await fetchPingWindowData(target, rangeParam, { mergeSamples: true, updateVisibleSummary: true });
+    } catch (error) {
+      console.error("Falha ao atualizar janela visual:", error);
+    }
+  }
+  updateDnsKpi();
+  scheduleRender();
+  updateNetworkStatus();
+}
+
+async function bootstrapTargetData(target) {
+  if (!target) {
+    return;
+  }
+  try {
+    await fetchPingWindowData(target, "60m", { mergeSamples: false });
+    await fetchPingWindowData(target, getRangeParamFromMinutes(state.rangeMinutes), {
+      mergeSamples: true,
+      updateVisibleSummary: true,
+    });
+  } finally {
+    updateDnsKpi();
+  }
+}
 function initCharts() {
   if (typeof echarts === "undefined") {
     console.error("ECharts não carregado");
@@ -377,9 +468,8 @@ function initCharts() {
   charts.latency = echarts.init(document.getElementById("latencyChart"), null, {
     renderer: "canvas",
   });
-  charts.heatmap = echarts.init(document.getElementById("heatmapChart"), null, {
-    renderer: "canvas",
-  });
+  const heatmapHost = document.getElementById("heatmapChart");
+  charts.heatmap = HEATMAP_ENABLED && heatmapHost ? echarts.init(heatmapHost, null, { renderer: "canvas" }) : null;
   charts.availability = echarts.init(document.getElementById("availabilityGauge"), null, {
     renderer: "canvas",
   });
@@ -392,22 +482,13 @@ function initCharts() {
   });
 
   configureLatencyChart();
-  configureHeatmap();
+  if (HEATMAP_ENABLED) {
+    configureHeatmap();
+  }
   configureGauge();
   configureSparkline(charts.dns, "#38bdf8");
   configureSparkline(charts.httpTtfb, "#f97316");
   configureSparkline(charts.httpTotal, "#8b5cf6");
-
-  charts.latency?.on("legendselectchanged", (event) => {
-    if (!event || event.name !== "Perda (%)") {
-      return;
-    }
-    state.lossUserToggled = true;
-    state.showLoss = Boolean(event.selected?.["Perda (%)"]);
-    if (refs.lossToggle) {
-      refs.lossToggle.checked = state.showLoss;
-    }
-  });
 
   window.addEventListener("resize", () => {
     resizeCharts();
@@ -420,40 +501,43 @@ function configureLatencyChart() {
   }
   charts.latency.setOption({
     backgroundColor: "transparent",
-    animationDuration: 300,
-    animationDurationUpdate: 260,
+    animationDuration: 260,
     legend: {
-      top: 0,
+      bottom: 0,
       textStyle: {
         color:
           getComputedStyle(document.documentElement).getPropertyValue("--text-muted") || "#94a3b8",
       },
+      data: ["RTT por amostra", "Perda"],
     },
-    grid: { left: 60, right: 60, top: 50, bottom: 70 },
+    grid: { left: 60, right: 40, top: 40, bottom: 80 },
     tooltip: {
       trigger: "axis",
-      axisPointer: {
-        type: "cross",
-        label: {
-          backgroundColor: "rgba(15,23,42,0.9)",
-        },
-      },
+      axisPointer: { type: "line" },
       backgroundColor: "rgba(15, 23, 42, 0.88)",
       borderWidth: 0,
       textStyle: { color: "#e2e8f0" },
       formatter: (params) => {
+        if (!params || params.length === 0) {
+          return STRINGS.noData || "Sem dados suficientes no período.";
+        }
+        const lines = [];
         const axisLabel = params[0]?.axisValueLabel;
-        const lines = axisLabel ? [axisLabel] : [];
+        if (axisLabel) {
+          lines.push(axisLabel);
+        }
         params.forEach((serie) => {
           if (!serie) {
             return;
           }
-          const value = Array.isArray(serie.value) ? serie.value[1] : serie.value;
-          if (!Number.isFinite(value)) {
+          if (serie.seriesName === "Perda") {
+            lines.push(`${serie.marker} Perda de pacote`);
             return;
           }
-          const formatted = serie.seriesName.includes("Perda") ? fmtPct(value) : fmtMs(value);
-          lines.push(`${serie.marker} ${serie.seriesName}: ${formatted}`);
+          const value = Array.isArray(serie.value) ? serie.value[1] : serie.value;
+          if (Number.isFinite(value)) {
+            lines.push(`${serie.marker} RTT: ${fmtMs(value)}`);
+          }
         });
         if (lines.length === (axisLabel ? 1 : 0)) {
           return STRINGS.noData || "Sem dados suficientes no período.";
@@ -463,7 +547,7 @@ function configureLatencyChart() {
     },
     dataZoom: [
       { type: "inside", throttle: 50 },
-      { type: "slider", bottom: 8, textStyle: { color: "#94a3b8" } },
+      { type: "slider", bottom: 24, textStyle: { color: "#94a3b8" } },
     ],
     xAxis: {
       type: "time",
@@ -472,67 +556,34 @@ function configureLatencyChart() {
       axisLabel: { color: "var(--text-muted)" },
       splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.15)" } },
     },
-    yAxis: [
-      {
-        type: "value",
-        name: "ms",
-        nameTextStyle: { color: "var(--text-muted)" },
-        axisLabel: {
-          color: "var(--text-muted)",
-          formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)} ms` : value),
-        },
-        splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.12)" } },
+    yAxis: {
+      type: "value",
+      name: "ms",
+      nameTextStyle: { color: "var(--text-muted)" },
+      axisLabel: {
+        color: "var(--text-muted)",
+        formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)} ms` : value),
       },
-      {
-        type: "value",
-        name: "Perda %",
-        alignTicks: true,
-        min: 0,
-        max: 100,
-        axisLabel: {
-          color: "var(--text-muted)",
-          formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)}%` : value),
-        },
-        splitLine: { show: false },
-      },
-    ],
+      splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.12)" } },
+    },
     series: [
       {
-        name: "RTT p50",
+        name: "RTT por amostra",
         type: "line",
-        smooth: true,
+        step: "end",
         showSymbol: false,
+        symbolSize: 6,
+        smooth: false,
         lineStyle: { width: 2.4, color: "#38bdf8" },
         emphasis: { focus: "series" },
         data: [],
       },
       {
-        name: "RTT médio",
-        type: "line",
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 2.2, color: "#34d399" },
-        emphasis: { focus: "series" },
-        data: [],
-      },
-      {
-        name: "RTT p95",
-        type: "line",
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 2.4, color: "#fbbf24" },
-        emphasis: { focus: "series" },
-        data: [],
-      },
-      {
-        name: "Perda (%)",
-        type: "line",
-        smooth: true,
-        showSymbol: false,
-        yAxisIndex: 1,
-        lineStyle: { width: 1.8, color: "#f87171" },
-        areaStyle: { opacity: 0.16, color: "rgba(248, 113, 113, 0.35)" },
-        emphasis: { focus: "series" },
+        name: "Perda",
+        type: "scatter",
+        symbol: "triangle",
+        symbolSize: 12,
+        itemStyle: { color: "#f87171" },
         data: [],
       },
     ],
@@ -834,7 +885,7 @@ function updateTargets(targetList) {
     state.selectedTarget = preferred ?? "";
     state.tracerouteExpanded = false;
     if (state.selectedTarget) {
-      fetchPingHistory(state.selectedTarget).catch(() => {});
+      bootstrapTargetData(state.selectedTarget).catch(() => {});
       fetchTraceroute(state.selectedTarget).catch(() => {});
     }
   }
@@ -915,26 +966,37 @@ function updateTargetStatusDisplay() {
 
 function ingestPingMetrics(target, metrics, ts) {
   updateTargetIndicators(target, metrics);
-  const entry = {
-    ts,
-    p50: normalize(metrics?.win1m?.p50_ms),
-    p95: normalize(metrics?.win1m?.p95_ms),
-    avg: normalize(metrics?.win1m?.avg_ms),
-    loss: normalize(metrics?.win1m?.loss_pct),
-    samples: Number(metrics?.win1m?.samples) || 0,
-    p50_5m: normalize(metrics?.win5m?.p50_ms),
-    p95_5m: normalize(metrics?.win5m?.p95_ms),
-    avg_5m: normalize(metrics?.win5m?.avg_ms),
-    loss_5m: normalize(metrics?.win5m?.loss_pct),
-  };
-  if (!state.pingSeries.has(target)) {
-    state.pingSeries.set(target, []);
+  const summaryMap = state.windowSummaries.get(target) ?? new Map();
+  WINDOW_OPTION_MAP.forEach((key) => {
+    const summary = buildSummaryFromMetrics(metrics, key);
+    if (summary) {
+      summaryMap.set(key, summary);
+    }
+  });
+  state.windowSummaries.set(target, summaryMap);
+
+  const lastSample = metrics?.lastSample;
+  if (lastSample) {
+    const sampleTs = Number(lastSample.ts ?? ts);
+    if (Number.isFinite(sampleTs)) {
+      const success = lastSample.up === 1 || lastSample.up === true || Number(lastSample.up) === 1;
+      const rttValue = normalize(lastSample.rtt_ms);
+      const sample = { ts: sampleTs, success, rtt: success ? rttValue : null };
+      const existing = state.pingSamples.get(target) ?? [];
+      const latest = state.latestSampleTs.get(target) ?? -Infinity;
+      if (sampleTs > latest) {
+        const merged = mergeSampleSeries(existing, [sample]);
+        state.pingSamples.set(target, merged);
+        state.latestSampleTs.set(target, sampleTs);
+      }
+    }
   }
-  const series = state.pingSeries.get(target);
-  series.push(entry);
-  pruneSeries(series, HISTORY_LIMIT_MS);
-  updateKpis(metrics, entry);
-  updateEventsFromPing(entry);
+
+  if (target === state.selectedTarget) {
+    applyCurrentWindowSummary();
+    updateEventsFromSummary(getCurrentWindowSummary());
+  }
+
   updateTargetStatusDisplay();
 }
 
@@ -942,19 +1004,43 @@ function ingestDnsMetrics(dns, ts) {
   if (!dns || !dns.aggregate) {
     return;
   }
+  state.dnsLatest = dns.aggregate;
   const value = normalize(dns.aggregate.win1m_avg_ms);
   const entry = { ts, value, avg5m: normalize(dns.aggregate.win5m_avg_ms) };
   state.dnsSeries.push(entry);
   pruneSeries(state.dnsSeries, DNS_HISTORY_LIMIT_MS);
+  updateDnsKpi();
+  updateEventsForMetric("dns", value, thresholds.dns, "DNS lookup elevado", {
+    formatter: fmtMs,
+    eventType: "dns",
+  });
+}
+
+function resolveDnsValueForWindow(windowKey) {
+  const aggregate = state.dnsLatest;
+  if (!aggregate) {
+    return null;
+  }
+  switch (windowKey) {
+    case "win5m":
+      return normalize(aggregate.win5m_avg_ms);
+    case "win15m":
+      return normalize(aggregate.win15m_avg_ms);
+    case "win60m":
+      return normalize(aggregate.win60m_avg_ms);
+    case "win1m":
+    default:
+      return normalize(aggregate.win1m_avg_ms);
+  }
+}
+
+function updateDnsKpi() {
+  const windowKey = getWindowKeyFromMinutes(state.rangeMinutes);
+  const value = resolveDnsValueForWindow(windowKey);
   updateKpi("dns-lookup", value, {
     threshold: thresholds.dns,
     higherIsBad: true,
     trendKey: "dns-lookup",
-    subText: `5m: ${fmtMs(entry.avg5m)}`,
-  });
-  updateEventsForMetric("dns", value, thresholds.dns, "DNS lookup elevado", {
-    formatter: fmtMs,
-    eventType: "dns",
   });
 }
 
@@ -996,45 +1082,41 @@ function ingestHttpMetrics(http, ts) {
     subText: `5m: ${fmtMs(totalEntry.avg5m)}`,
   });
 }
-function updateKpis(metrics, latestEntry) {
-  const loss = latestEntry.loss;
-  updateKpi("ping-p95", latestEntry.p95, {
+function updateKpis(summary) {
+  const p95 = summary?.win_p95_ms;
+  const p50 = summary?.win_p50_ms;
+  const avg = summary?.win_avg_ms;
+  const loss = summary?.win_loss_pct;
+  updateKpi("ping-p95", p95, {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-p95",
-    subText: `5m: ${fmtMs(latestEntry.p95_5m)}`,
   });
-  updateKpi("ping-p50", latestEntry.p50, {
+  updateKpi("ping-p50", p50, {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-p50",
-    subText: `5m: ${fmtMs(latestEntry.p50_5m)}`,
   });
-  updateKpi("ping-avg", latestEntry.avg, {
+  updateKpi("ping-avg", avg, {
     threshold: thresholds.p95,
     higherIsBad: true,
     trendKey: "ping-avg",
-    subText: `5m: ${fmtMs(latestEntry.avg_5m)}`,
   });
   updateKpi("ping-loss", loss, {
     threshold: thresholds.loss,
     higherIsBad: true,
     trendKey: "ping-loss",
     formatter: fmtPct,
-    subText: `5m: ${fmtPct(latestEntry.loss_5m)}`,
   });
   const availability = loss == null ? null : clampGaugeValue(100 - loss);
-  const availability5m =
-    latestEntry.loss_5m == null ? null : clampGaugeValue(100 - latestEntry.loss_5m);
   updateKpi("ping-availability", availability, {
     threshold: thresholds.loss,
     higherIsBad: false,
     trendKey: "ping-availability",
     formatter: (value) => fmtPct(value),
-    subText: `5m: ${fmtPct(availability5m)}`,
   });
   updateGauge(availability);
-  updateNetworkStatus(latestEntry);
+  updateNetworkStatus(summary);
 }
 
 function getAvailabilityColor(value) {
@@ -1082,24 +1164,6 @@ function updateGauge(value) {
   });
 }
 
-function updateLatencySeriesVisibility() {
-  if (!charts.latency) {
-    return;
-  }
-  const showLossSeries = state.lossHasData && state.showLoss;
-  charts.latency.setOption({
-    series: [
-      {},
-      {},
-      {},
-      {
-        show: showLossSeries,
-      },
-    ],
-    legend: { selected: { "Perda (%)": showLossSeries } },
-  });
-}
-
 function renderKpiValue(element, valueText) {
   if (!element) {
     return;
@@ -1120,19 +1184,47 @@ function renderKpiValue(element, valueText) {
   element.innerHTML = `${numberSpan}${unitSpan}`;
 }
 
-function updateNetworkStatus(latestEntry) {
+function getCurrentWindowSummary() {
+  if (!state.selectedTarget) {
+    return null;
+  }
+  const summaries = state.windowSummaries.get(state.selectedTarget);
+  if (!summaries) {
+    return null;
+  }
+  const key = getWindowKeyFromMinutes(state.rangeMinutes);
+  return summaries.get(key) ?? null;
+}
+
+function applyCurrentWindowSummary() {
+  const summary = getCurrentWindowSummary();
+  updateKpis(summary);
+}
+
+function buildSummaryFromMetrics(metrics, key) {
+  if (!metrics || !metrics[key]) {
+    return null;
+  }
+  const entry = metrics[key];
+  return {
+    win_p95_ms: normalize(entry.p95_ms),
+    win_p50_ms: normalize(entry.p50_ms),
+    win_avg_ms: normalize(entry.avg_ms),
+    win_loss_pct: normalize(entry.loss_pct),
+    win_samples: Number(entry.samples) || 0,
+  };
+}
+
+function updateNetworkStatus(summary) {
   if (!refs.networkStatusBar || !refs.networkStatusText) {
     return;
   }
-  let entry = latestEntry;
-  if (!entry && state.selectedTarget) {
-    const series = state.pingSeries.get(state.selectedTarget);
-    if (Array.isArray(series) && series.length > 0) {
-      entry = series[series.length - 1];
-    }
+  let entry = summary;
+  if (!entry) {
+    entry = getCurrentWindowSummary();
   }
-  const hasLatency = Number.isFinite(entry?.p95);
-  const hasLoss = Number.isFinite(entry?.loss);
+  const hasLatency = Number.isFinite(entry?.win_p95_ms);
+  const hasLoss = Number.isFinite(entry?.win_loss_pct);
   if (!hasLatency && !hasLoss) {
     refs.networkStatusBar.className = "network-status network-status--idle";
     refs.networkStatusText.textContent = "Aguardando dados de RTT…";
@@ -1173,10 +1265,6 @@ function updateKpi(key, value, options = {}) {
     card.valueEl.removeAttribute("title");
     card.element.removeAttribute("data-loading");
   }
-  if (card.subEl && options.subText) {
-    card.subEl.textContent = options.subText;
-  }
-
   const severity = determineSeverity(value, options.threshold, options.higherIsBad !== false);
   const previous = state.severities.get(key) || "ok";
   state.severities.set(key, severity);
@@ -1268,29 +1356,32 @@ function computeTrend(key, value, higherIsBad) {
   return { label: formatted, color, direction };
 }
 
-function updateEventsFromPing(entry) {
-  updateEventsForMetric("ping-p95", entry.p95, thresholds.p95, "RTT p95 elevado", {
+function updateEventsFromSummary(summary) {
+  if (!summary) {
+    return;
+  }
+  updateEventsForMetric("ping-p95", summary.win_p95_ms, thresholds.p95, "RTT p95 elevado", {
     formatter: fmtMs,
     eventType: "ping",
   });
-  updateEventsForMetric("ping-loss", entry.loss, thresholds.loss, "Perda elevada", {
+  updateEventsForMetric("ping-loss", summary.win_loss_pct, thresholds.loss, "Perda elevada", {
     formatter: fmtPct,
     eventType: "ping-loss",
     higherIsBad: true,
   });
-  if (Number.isFinite(entry.p95) && Number.isFinite(state.prevValues.get("ping-p95"))) {
-    const previous = state.prevValues.get("ping-p95");
-    if (entry.p95 > previous * 1.4 && entry.p95 - previous > 20) {
+  const previous = state.prevValues.get("ping-p95");
+  if (Number.isFinite(summary.win_p95_ms) && Number.isFinite(previous)) {
+    if (summary.win_p95_ms > previous * 1.4 && summary.win_p95_ms - previous > 20) {
       pushEvent({
         key: "ping-spike",
         type: "ping",
         severity: "warn",
-        message: `Spike de RTT p95 (${fmtMs(entry.p95)})`,
+        message: `Spike de RTT p95 (${fmtMs(summary.win_p95_ms)})`,
         icon: "🚀",
       });
     }
   }
-  state.prevValues.set("ping-p95", entry.p95);
+  state.prevValues.set("ping-p95", summary.win_p95_ms);
 }
 
 function updateEventsForMetric(key, value, threshold, label, options = {}) {
@@ -1425,6 +1516,23 @@ function pruneSeries(series, windowMs) {
   }
 }
 
+function mergeSampleSeries(existing, incoming) {
+  const map = new Map();
+  existing.forEach((item) => {
+    if (item && Number.isFinite(Number(item.ts))) {
+      map.set(Number(item.ts), item);
+    }
+  });
+  incoming.forEach((item) => {
+    if (item && Number.isFinite(Number(item.ts))) {
+      map.set(Number(item.ts), item);
+    }
+  });
+  const merged = Array.from(map.values()).sort((a, b) => Number(a.ts) - Number(b.ts));
+  pruneSeries(merged, HISTORY_LIMIT_MS);
+  return merged;
+}
+
 function scheduleRender() {
   if (renderScheduled) {
     return;
@@ -1456,110 +1564,60 @@ function renderLatencyChart() {
     setChartEmptyState("latencyChart", true);
     return;
   }
-  const series = state.pingSeries.get(state.selectedTarget) || [];
+  const samples = state.pingSamples.get(state.selectedTarget) || [];
   const cutoff = Date.now() - state.rangeMinutes * 60 * 1000;
-  const filtered = series.filter((item) => item.ts >= cutoff);
-  const p50 = [];
-  const avg = [];
-  const p95 = [];
-  const loss = [];
-  const latencyValues = [];
-  const lossValues = [];
+  const filtered = samples.filter((sample) => Number(sample.ts) >= cutoff);
+  const rttSeries = [];
+  const lossSeries = [];
+  const rttValues = [];
 
-  filtered.forEach((item) => {
-    if (Number.isFinite(item.p50)) {
-      p50.push([item.ts, item.p50]);
-      latencyValues.push(item.p50);
+  filtered.forEach((sample) => {
+    const ts = Number(sample.ts);
+    if (!Number.isFinite(ts)) {
+      return;
     }
-    if (Number.isFinite(item.avg)) {
-      avg.push([item.ts, item.avg]);
-      latencyValues.push(item.avg);
-    }
-    if (Number.isFinite(item.p95)) {
-      p95.push([item.ts, item.p95]);
-      latencyValues.push(item.p95);
-    }
-    if (Number.isFinite(item.loss)) {
-      loss.push([item.ts, item.loss]);
-      lossValues.push(item.loss);
+    if (sample.success && Number.isFinite(sample.rtt)) {
+      const value = Number(sample.rtt);
+      rttSeries.push([ts, value]);
+      rttValues.push(value);
+    } else if (!sample.success) {
+      lossSeries.push([ts, 0]);
     }
   });
 
-  const hasLatencyData = latencyValues.length > 0;
-  const hasLossData = lossValues.length > 0;
-
-  if (!hasLatencyData && !hasLossData) {
+  if (rttSeries.length === 0 && lossSeries.length === 0) {
     setChartEmptyState("latencyChart", true);
     charts.latency.setOption({
-      yAxis: [
-        { min: 0, max: 1 },
-        { min: 0, max: 1 },
-      ],
-      series: [{ data: [] }, { data: [] }, { data: [] }, { data: [], show: false }],
+      yAxis: { min: 0, max: 1 },
+      series: [{ data: [] }, { data: [] }],
     });
-    state.lossHasData = false;
-    updateLatencySeriesVisibility();
     return;
   }
 
   setChartEmptyState("latencyChart", false);
 
-  let latMin = hasLatencyData ? Math.min(...latencyValues) : 0;
-  let latMax = hasLatencyData ? Math.max(...latencyValues) : 0;
-  let latMinDomain = Math.max(0, latMin * 0.9);
-  let latMaxDomain = latMax * 1.1;
-  if (!hasLatencyData || (latMin === 0 && latMax === 0)) {
-    latMinDomain = 0;
-    latMaxDomain = 1;
-  } else {
-    latMaxDomain = Math.max(latMaxDomain, latMinDomain + 1);
+  let minValue = 0;
+  let maxValue = 1;
+  if (rttValues.length > 0) {
+    const minRtt = Math.min(...rttValues);
+    const maxRtt = Math.max(...rttValues);
+    minValue = Math.max(0, minRtt * 0.9);
+    maxValue = Math.max(maxRtt * 1.1, minValue + 1);
   }
-
-  let lossMinDomain = 0;
-  let lossMaxDomain = 1;
-  if (hasLossData) {
-    const lossMin = Math.min(...lossValues);
-    const lossMax = Math.max(...lossValues);
-    lossMinDomain = Math.max(0, lossMin * 0.9);
-    lossMaxDomain = lossMax === 0 ? 1 : Math.min(100, lossMax * 1.1);
-    if (lossMin === 0 && lossMax === 0) {
-      lossMaxDomain = 1;
-    }
-  }
-
-  if (hasLossData && !state.lossHasData) {
-    state.lossHasData = true;
-    if (!state.lossUserToggled && refs.lossToggle) {
-      state.showLoss = true;
-      refs.lossToggle.checked = true;
-    }
-  }
-  if (!hasLossData && state.lossHasData) {
-    state.lossHasData = false;
-    if (!state.lossUserToggled && refs.lossToggle) {
-      refs.lossToggle.checked = false;
-    }
-  }
-
-  const showLossSeries = state.lossHasData && state.showLoss;
 
   charts.latency.setOption({
-    yAxis: [
-      { min: latMinDomain, max: latMaxDomain },
-      { min: lossMinDomain, max: lossMaxDomain },
-    ],
-    series: [{ data: p50 }, { data: avg }, { data: p95 }, { data: loss, show: showLossSeries }],
-    legend: { selected: { "Perda (%)": showLossSeries } },
+    yAxis: { min: minValue, max: maxValue },
+    series: [{ data: rttSeries }, { data: lossSeries }],
   });
 }
 
 function renderHeatmap() {
-  if (!charts.heatmap || !state.selectedTarget) {
+  if (!HEATMAP_ENABLED || !charts.heatmap || !state.selectedTarget) {
     setChartEmptyState("heatmapChart", true);
     return;
   }
-  const series = state.pingSeries.get(state.selectedTarget) || [];
-  const data = series
+  const aggregates = state.pingAggregates.get(state.selectedTarget) || [];
+  const data = aggregates
     .filter((item) => Number.isFinite(item.p95))
     .map((item) => {
       const bucketIndex = HEAT_BUCKETS.findIndex((boundary) => item.p95 <= boundary);
@@ -1642,37 +1700,76 @@ function updateLastUpdate() {
   refs.lastUpdate.setAttribute("datetime", iso);
 }
 
-async function fetchPingHistory(target) {
+async function fetchPingWindowData(target, rangeKey, options = {}) {
   if (!target) {
     return;
   }
+  const rangeParam = typeof rangeKey === "string" && rangeKey ? rangeKey : getRangeParamFromMinutes(state.rangeMinutes);
   try {
-    const url = await resolveEndpoint(API_PING_WINDOW, { range: "1h", target });
+    const url = await resolveEndpoint(API_PING_WINDOW, { range: rangeParam, target });
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
-    const data = await response.json();
-    if (!Array.isArray(data)) {
+    const payload = await response.json();
+    if (!payload || typeof payload !== "object") {
       return;
     }
-    const mapped = data.map((row) => ({
-      ts: Number(row.ts_min),
-      p50: normalize(row.p50_ms),
-      p95: normalize(row.p95_ms),
-      avg: normalize(row.avg_ms),
-      loss: normalize(row.loss_pct),
-      samples: Number(row.sent) || 0,
-      p50_5m: normalize(row.p50_ms),
-      p95_5m: normalize(row.p95_ms),
-      avg_5m: normalize(row.avg_ms),
-      loss_5m: normalize(row.loss_pct),
-    }));
-    state.pingSeries.set(target, mapped);
-    heatmapNeedsRefresh = true;
+
+    const resolvedRangeKey = getWindowKeyFromRange(payload.range ?? rangeParam);
+    const samples = Array.isArray(payload.samples)
+      ? payload.samples
+          .map((row) => ({
+            ts: Number(row.ts),
+            success: Boolean(row.success),
+            rtt: normalize(row.rtt_ms),
+          }))
+          .filter((row) => Number.isFinite(row.ts))
+      : [];
+    if (samples.length) {
+      const existing = state.pingSamples.get(target) ?? [];
+      const merged = options.mergeSamples ? mergeSampleSeries(existing, samples) : mergeSampleSeries([], samples);
+      state.pingSamples.set(target, merged);
+      state.latestSampleTs.set(target, merged.length ? merged[merged.length - 1].ts : null);
+    } else if (!state.pingSamples.has(target)) {
+      state.pingSamples.set(target, []);
+    }
+
+    const aggregates = Array.isArray(payload.aggregates)
+      ? payload.aggregates
+          .map((row) => ({
+            ts: Number(row.ts_min),
+            p95: normalize(row.p95_ms),
+            samples: Number(row.sent ?? row.samples) || 0,
+          }))
+          .filter((row) => Number.isFinite(row.ts))
+      : [];
+    const shouldUpdateAggregates = rangeParam === "60m" || rangeParam === "1h";
+    if (shouldUpdateAggregates) {
+      state.pingAggregates.set(target, aggregates);
+      heatmapNeedsRefresh = true;
+    }
+
+    const summary = payload.summary && typeof payload.summary === "object" ? payload.summary : null;
+    if (summary) {
+      const summaryMap = state.windowSummaries.get(target) ?? new Map();
+      summaryMap.set(resolvedRangeKey, {
+        win_p95_ms: normalize(summary.win_p95_ms),
+        win_p50_ms: normalize(summary.win_p50_ms),
+        win_avg_ms: normalize(summary.win_avg_ms),
+        win_loss_pct: normalize(summary.win_loss_pct),
+        win_samples: Number(summary.win_samples) || 0,
+      });
+      state.windowSummaries.set(target, summaryMap);
+    }
+
+    if (options.updateVisibleSummary) {
+      applyCurrentWindowSummary();
+    }
+
     scheduleRender();
   } catch (error) {
-    console.error("Falha ao buscar histórico de ping:", error);
+    console.error("Falha ao buscar dados da janela de ping:", error);
   }
 }
 
