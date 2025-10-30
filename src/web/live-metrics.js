@@ -10,6 +10,8 @@ import * as logger from "../utils/logger.js";
 
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
+const MAX_RECENT_SAMPLES = 3600;
+const MIN_SAMPLES_PER_WINDOW = 3;
 
 function computePercentile(values, percentile) {
   if (!values || values.length === 0) {
@@ -86,33 +88,146 @@ function extractPingTargets({ configTargets, runtimeTargets, windowTargets }) {
   return Array.from(targets).sort();
 }
 
-function buildWindowEntries(windowDefs, snapshot) {
+function sanitizeSampleEntry(entry) {
+  const ts = Number(entry?.ts);
+  if (!Number.isFinite(ts)) {
+    return null;
+  }
+
+  const success =
+    entry?.success === true ||
+    entry?.success === 1 ||
+    entry?.success === "1" ||
+    entry?.up === 1 ||
+    entry?.up === true ||
+    entry?.up === "1";
+  const latencyCandidate = entry?.rtt_ms ?? entry?.rtt ?? entry?.latency_ms;
+  const latencyValue = Number(latencyCandidate);
+  const rttMs = success && Number.isFinite(latencyValue) && latencyValue >= 0 ? latencyValue : null;
+
+  return { ts, success, rtt_ms: rttMs };
+}
+
+function collectSampleEntries({ snapshotRecent, fallbackRows, maxEntries }) {
+  const fromSnapshot = Array.isArray(snapshotRecent)
+    ? snapshotRecent.map(sanitizeSampleEntry).filter(Boolean)
+    : [];
+
+  if (fromSnapshot.length > 0) {
+    return limitSamples(fromSnapshot, maxEntries);
+  }
+
+  const fromFallback = Array.isArray(fallbackRows)
+    ? fallbackRows.map(sanitizeSampleEntry).filter(Boolean)
+    : [];
+
+  return limitSamples(fromFallback, maxEntries);
+}
+
+function limitSamples(samples, maxEntries) {
+  if (!Array.isArray(samples) || samples.length === 0) {
+    return [];
+  }
+
+  const sorted = samples.slice().sort((a, b) => a.ts - b.ts);
+  if (!Number.isFinite(maxEntries) || maxEntries <= 0 || sorted.length <= maxEntries) {
+    return sorted;
+  }
+
+  return sorted.slice(sorted.length - maxEntries);
+}
+
+function computeWindowStatsFromSamples(samples, windowMs, now) {
+  if (!Array.isArray(samples) || samples.length === 0 || !Number.isFinite(windowMs) || windowMs <= 0) {
+    return {
+      count: 0,
+      p50_ms: null,
+      p95_ms: null,
+      avg_ms: null,
+      loss_pct: null,
+      disponibilidade_pct: null,
+    };
+  }
+
+  const cutoff = now - windowMs;
+  const windowSamples = samples.filter((sample) => Number(sample?.ts) >= cutoff);
+  const count = windowSamples.length;
+  if (count === 0) {
+    return {
+      count: 0,
+      p50_ms: null,
+      p95_ms: null,
+      avg_ms: null,
+      loss_pct: null,
+      disponibilidade_pct: null,
+    };
+  }
+
+  const successSamples = windowSamples.filter((sample) => sample?.success);
+  const latencyValues = successSamples
+    .map((sample) => Number(sample?.rtt_ms))
+    .filter((value) => Number.isFinite(value) && value >= 0);
+
+  const successCount = successSamples.length;
+  const avgMs = latencyValues.length > 0 ? average(latencyValues) : null;
+  const p50 = latencyValues.length > 0 ? computePercentile(latencyValues, 0.5) : null;
+  const p95 = latencyValues.length > 0 ? computePercentile(latencyValues, 0.95) : null;
+
+  const lossRaw = count > 0 ? ((count - successCount) / count) * 100 : null;
+  const lossPct = Number.isFinite(lossRaw) ? Math.max(0, Math.min(100, lossRaw)) : null;
+  const availability = lossPct == null ? null : Math.max(0, Math.min(100, 100 - lossPct));
+
+  return {
+    count,
+    p50_ms: Number.isFinite(p50) ? p50 : null,
+    p95_ms: Number.isFinite(p95) ? p95 : null,
+    avg_ms: Number.isFinite(avgMs) ? avgMs : null,
+    loss_pct: lossPct,
+    disponibilidade_pct: availability,
+  };
+}
+
+function buildWindowEntries(windowDefs, { samples, now, minSamples }) {
   const entries = {};
+  const safeMinSamples = Number.isFinite(minSamples) && minSamples > 0 ? Math.floor(minSamples) : 1;
+
   for (const def of windowDefs) {
-    const windowMetrics = snapshot?.windows?.[def.id] ?? null;
-    const count = Number.isFinite(windowMetrics?.count)
-      ? Math.max(0, Number(windowMetrics.count))
-      : 0;
-    const loss = clampPercentage(windowMetrics?.loss_pct);
+    if (!def || !def.id) {
+      continue;
+    }
+    const windowMs = Number(def.durationMs);
+    const stats = computeWindowStatsFromSamples(samples, windowMs, now);
+    const count = Number.isFinite(stats?.count) ? Math.max(0, Math.floor(stats.count)) : 0;
+    const loss = clampPercentage(stats?.loss_pct);
     const availability = clampPercentage(
-      windowMetrics?.disponibilidade_pct ?? windowMetrics?.availability_pct ?? (loss == null ? null : 100 - loss)
+      stats?.disponibilidade_pct ?? (loss == null ? null : 100 - loss)
     );
 
     entries[def.id] = {
       count,
-      p50_ms: normalizeNumber(windowMetrics?.p50_ms),
-      p95_ms: normalizeNumber(windowMetrics?.p95_ms),
-      avg_ms: normalizeNumber(windowMetrics?.avg_ms),
+      p50_ms: normalizeNumber(stats?.p50_ms),
+      p95_ms: normalizeNumber(stats?.p95_ms),
+      avg_ms: normalizeNumber(stats?.avg_ms),
       loss_pct: loss,
       disponibilidade_pct: availability,
       availability_pct: availability,
-      status: count > 0 ? "ok" : "insufficient",
+      status: count >= safeMinSamples ? "ok" : "insufficient",
+      duration_ms: Number.isFinite(windowMs) && windowMs > 0 ? windowMs : null,
     };
   }
   return entries;
 }
 
-function computePingMetrics({ now, configTargets, runtimeState, staleThresholdMs, windowDefs }) {
+function computePingMetrics({
+  now,
+  configTargets,
+  runtimeState,
+  staleThresholdMs,
+  windowDefs,
+  fetchRecentSamples,
+  maxRecentEntries = MAX_RECENT_SAMPLES,
+  minSamplesPerWindow = MIN_SAMPLES_PER_WINDOW,
+}) {
   const windowEnabled = realtimeWindowsEnabled();
   const windowTargets = windowEnabled ? getRealtimeWindowTargets() : [];
   const runtimeStateMap = runtimeState && typeof runtimeState === "object" ? runtimeState : {};
@@ -126,30 +241,40 @@ function computePingMetrics({ now, configTargets, runtimeState, staleThresholdMs
   const payload = {};
   const staleLimit = Number.isFinite(staleThresholdMs) ? Math.max(0, staleThresholdMs) : 10000;
 
+  const longestWindowMs = windowDefs.reduce((acc, def) => {
+    const ms = Number(def?.durationMs);
+    return Number.isFinite(ms) && ms > acc ? ms : acc;
+  }, 0);
+  const fallbackSince = longestWindowMs > 0 ? now - longestWindowMs - 5000 : now - MINUTE_MS;
+
   for (const target of targets) {
     const snapshot = windowEnabled
       ? getRealtimeWindowSnapshot(target, { now })
       : { windows: {}, recent: [], latestTs: null };
 
-    const recent = Array.isArray(snapshot?.recent)
-      ? snapshot.recent
-          .map((entry) => {
-            const ts = Number(entry?.ts);
-            if (!Number.isFinite(ts)) {
-              return null;
-            }
-            const success = Boolean(entry?.success);
-            const rttValue = Number(entry?.rtt_ms);
-            return {
-              ts,
-              success,
-              rtt_ms: success && Number.isFinite(rttValue) ? rttValue : null,
-            };
-          })
-          .filter(Boolean)
-      : [];
+    let fallbackRows = [];
+    if ((!snapshot?.recent || snapshot.recent.length === 0) && typeof fetchRecentSamples === "function") {
+      try {
+        fallbackRows = fetchRecentSamples(target, fallbackSince);
+      } catch (error) {
+        logger.error("live", `failed to load fallback ping samples for ${target}:`, error);
+        fallbackRows = [];
+      }
+    }
 
-    const lastEntry = recent.length > 0 ? recent[recent.length - 1] : null;
+    const samples = collectSampleEntries({
+      snapshotRecent: snapshot?.recent,
+      fallbackRows,
+      maxEntries: maxRecentEntries,
+    });
+
+    const recent = samples.map((entry) => ({
+      ts: entry.ts,
+      success: Boolean(entry.success),
+      rtt_ms: entry.success && Number.isFinite(entry.rtt_ms) ? entry.rtt_ms : null,
+    }));
+
+    const lastEntry = samples.length > 0 ? samples[samples.length - 1] : null;
     const lastSample = lastEntry
       ? {
           ts: lastEntry.ts,
@@ -168,7 +293,11 @@ function computePingMetrics({ now, configTargets, runtimeState, staleThresholdMs
     const ageMs = resolvedTs != null ? Math.max(0, now - resolvedTs) : null;
     const fresh = ageMs != null ? ageMs <= staleLimit : false;
 
-    const windowsPayload = buildWindowEntries(windowDefs, snapshot);
+    const windowsPayload = buildWindowEntries(windowDefs, {
+      samples,
+      now,
+      minSamples: minSamplesPerWindow,
+    });
 
     const entry = {
       schema: "1.1.0",
@@ -338,6 +467,9 @@ class LiveMetricsBroadcaster extends EventEmitter {
       return {};
     }
     return {
+      pingRecentByTarget: this.db.prepare(
+        "SELECT ts, success, rtt_ms FROM ping_sample WHERE target = ? AND ts >= ? ORDER BY ts ASC"
+      ),
       dnsRecent: this.db.prepare(
         "SELECT ts, lookup_ms, lookup_ms_hot, lookup_ms_cold, success, success_hot, success_cold FROM dns_sample WHERE ts >= ? ORDER BY ts ASC"
       ),
@@ -505,12 +637,25 @@ class LiveMetricsBroadcaster extends EventEmitter {
   buildPayload() {
     const now = Date.now();
     const runtimeState = this.runtimeStateProvider ? this.runtimeStateProvider() : {};
+    const fetchRecentSamples =
+      this.statements.pingRecentByTarget &&
+      typeof this.statements.pingRecentByTarget.all === "function"
+        ? (target, since) => {
+            const normalizedTarget = String(target ?? "").trim();
+            if (!normalizedTarget) {
+              return [];
+            }
+            const sinceTs = Number.isFinite(since) ? since : now - MINUTE_MS;
+            return this.statements.pingRecentByTarget.all(normalizedTarget, sinceTs);
+          }
+        : null;
     const ping = computePingMetrics({
       now,
       configTargets: this.pingTargets,
       runtimeState,
       staleThresholdMs: this.staleThresholdMs,
       windowDefs: this.windowDefinitions,
+      fetchRecentSamples,
     });
 
     const dnsRows = this.statements.dnsRecent ? this.statements.dnsRecent.all(now - HOUR_MS) : [];
