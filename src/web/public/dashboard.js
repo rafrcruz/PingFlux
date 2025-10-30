@@ -346,6 +346,15 @@ let heatmapNeedsRefresh = false;
 let eventsRefreshTimer = null;
 let liveInactivityTimer = null;
 let recoveryTimer = null;
+let latencyChartDirty = true;
+
+const latencyChartState = {
+  target: null,
+  rangeMs: 0,
+  fingerprint: "",
+};
+
+const sparklineCache = new Map();
 
 function mergeAbortSignals(primary, secondary) {
   if (!primary) {
@@ -548,6 +557,9 @@ function mountTheme() {
     }
     configureGauges();
     refreshGaugeValues();
+    configureLatencyChart();
+    markLatencyChartDirty();
+    scheduleRender();
     resizeCharts();
   });
 }
@@ -573,6 +585,7 @@ function mountRangeButtons() {
         return;
       }
       state.rangeMinutes = minutes;
+      markLatencyChartDirty();
       updateWindowLabels();
       Array.from(refs.rangeButtons.querySelectorAll("button")).forEach((btn) => {
         btn.setAttribute("aria-pressed", btn === button ? "true" : "false");
@@ -599,6 +612,7 @@ function mountControls() {
     if (value && value !== state.selectedTarget) {
       state.selectedTarget = value;
       state.tracerouteExpanded = false;
+      markLatencyChartDirty();
       bootstrapTargetData(value).catch(() => {});
       fetchTraceroute(value).catch(() => {});
       scheduleRender();
@@ -688,6 +702,9 @@ function configureLatencyChart() {
   charts.latency.setOption({
     backgroundColor: "transparent",
     animationDuration: 260,
+    animationDurationUpdate: 220,
+    animationEasing: "cubicOut",
+    animationEasingUpdate: "linear",
     legend: {
       bottom: 0,
       textStyle: {
@@ -998,22 +1015,26 @@ function updateAvailabilityGauge(value) {
   const threshold = thresholds.loss;
   const pointerColor = numeric == null ? GAUGE_COLOR_NEUTRAL : resolveGaugeSeverityColor(numeric, threshold, false);
   const axisColors = buildGaugeAxisColors({ min: 0, max: 100, threshold, higherIsBad: false });
-  charts.availability.setOption({
-    series: [
-      {
-        min: 0,
-        max: 100,
-        splitNumber: 10,
-        axisLine: { lineStyle: { color: axisColors } },
-        pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
-        detail: {
-          color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
-          formatter: () => (numeric == null ? "—" : fmtPct(numeric)),
+  charts.availability.setOption(
+    {
+      series: [
+        {
+          min: 0,
+          max: 100,
+          splitNumber: 10,
+          axisLine: { lineStyle: { color: axisColors } },
+          pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
+          detail: {
+            color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
+            formatter: () => (numeric == null ? "—" : fmtPct(numeric)),
+          },
+          data: [{ value: numeric ?? 0 }],
         },
-        data: [{ value: numeric ?? 0 }],
-      },
-    ],
-  });
+      ],
+    },
+    false,
+    true
+  );
   setChartEmptyState("availabilityGauge", numeric == null);
 }
 
@@ -1032,23 +1053,27 @@ function updateDnsGauge(value) {
   });
   const pointerColor = numeric == null ? GAUGE_COLOR_NEUTRAL : resolveGaugeSeverityColor(numeric, threshold, true);
   const axisColors = buildGaugeAxisColors({ min: 0, max, threshold, higherIsBad: true });
-  charts.dnsGauge.setOption({
-    series: [
-      {
-        min: 0,
-        max,
-        splitNumber: 5,
-        axisLabel: { formatter: (val) => `${Math.round(val)} ms` },
-        axisLine: { lineStyle: { color: axisColors } },
-        pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
-        detail: {
-          color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
-          formatter: () => (numeric == null ? "—" : fmtMs(numeric)),
+  charts.dnsGauge.setOption(
+    {
+      series: [
+        {
+          min: 0,
+          max,
+          splitNumber: 5,
+          axisLabel: { formatter: (val) => `${Math.round(val)} ms` },
+          axisLine: { lineStyle: { color: axisColors } },
+          pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
+          detail: {
+            color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
+            formatter: () => (numeric == null ? "—" : fmtMs(numeric)),
+          },
+          data: [{ value: numeric == null ? 0 : Math.min(numeric, max) }],
         },
-        data: [{ value: numeric == null ? 0 : Math.min(numeric, max) }],
-      },
-    ],
-  });
+      ],
+    },
+    false,
+    true
+  );
   setChartEmptyState("dnsGauge", numeric == null);
 }
 
@@ -1067,23 +1092,27 @@ function updateHttpGauge(value) {
   });
   const pointerColor = numeric == null ? GAUGE_COLOR_NEUTRAL : resolveGaugeSeverityColor(numeric, threshold, true);
   const axisColors = buildGaugeAxisColors({ min: 0, max, threshold, higherIsBad: true });
-  charts.httpGauge.setOption({
-    series: [
-      {
-        min: 0,
-        max,
-        splitNumber: 5,
-        axisLabel: { formatter: (val) => `${Math.round(val)} ms` },
-        axisLine: { lineStyle: { color: axisColors } },
-        pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
-        detail: {
-          color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
-          formatter: () => (numeric == null ? "—" : fmtMs(numeric)),
+  charts.httpGauge.setOption(
+    {
+      series: [
+        {
+          min: 0,
+          max,
+          splitNumber: 5,
+          axisLabel: { formatter: (val) => `${Math.round(val)} ms` },
+          axisLine: { lineStyle: { color: axisColors } },
+          pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
+          detail: {
+            color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
+            formatter: () => (numeric == null ? "—" : fmtMs(numeric)),
+          },
+          data: [{ value: numeric == null ? 0 : Math.min(numeric, max) }],
         },
-        data: [{ value: numeric == null ? 0 : Math.min(numeric, max) }],
-      },
-    ],
-  });
+      ],
+    },
+    false,
+    true
+  );
   setChartEmptyState("httpGauge", numeric == null);
 }
 
@@ -1456,7 +1485,11 @@ function updateTargets(targetList) {
   state.targets = sorted;
   if (!state.selectedTarget || !sorted.includes(state.selectedTarget)) {
     const preferred = sorted.includes(DEFAULT_TARGET) ? DEFAULT_TARGET : sorted[0];
-    state.selectedTarget = preferred ?? "";
+    const nextTarget = preferred ?? "";
+    if (state.selectedTarget !== nextTarget) {
+      state.selectedTarget = nextTarget;
+      markLatencyChartDirty();
+    }
     state.tracerouteExpanded = false;
     if (state.selectedTarget) {
       bootstrapTargetData(state.selectedTarget).catch(() => {});
@@ -1588,6 +1621,7 @@ function ingestPingMetrics(target, metrics, ts) {
   }
 
   if (target === state.selectedTarget) {
+    markLatencyChartDirty();
     applyCurrentWindowSummary();
     updateEventsFromSummary(getCurrentWindowSummary());
   }
@@ -2177,6 +2211,10 @@ function mergeSampleSeries(existing, incoming) {
   return merged;
 }
 
+function markLatencyChartDirty() {
+  latencyChartDirty = true;
+}
+
 function scheduleRender() {
   if (renderScheduled) {
     return;
@@ -2191,7 +2229,9 @@ function scheduleRender() {
 function render() {
   updateConnectionStatus();
   updateLastUpdate();
-  renderLatencyChart();
+  if (latencyChartDirty) {
+    latencyChartDirty = !renderLatencyChart();
+  }
   if (heatmapNeedsRefresh) {
     renderHeatmap();
     heatmapNeedsRefresh = false;
@@ -2202,59 +2242,126 @@ function render() {
 }
 
 function renderLatencyChart() {
-  if (!charts.latency || !state.selectedTarget) {
-    setChartEmptyState("latencyChart", true);
-    return;
+  if (!charts.latency) {
+    return false;
   }
-  const samples = state.pingSamples.get(state.selectedTarget) || [];
-  const cutoff = Date.now() - state.rangeMinutes * 60 * 1000;
-  const filtered = samples.filter((sample) => Number(sample.ts) >= cutoff);
-  const rttSeries = [];
-  const lossSeries = [];
-  const rttValues = [];
-
-  filtered
-    .slice()
-    .sort((a, b) => Number(a.ts) - Number(b.ts))
-    .forEach((sample) => {
-      const ts = Number(sample.ts);
-      if (!Number.isFinite(ts)) {
-        return;
-      }
-
-      if (sample.success && Number.isFinite(sample.rtt)) {
-        const value = Number(sample.rtt);
-        rttSeries.push({ value: [ts, value] });
-        rttValues.push(value);
-      } else {
-        rttSeries.push({ value: [ts, null] });
-        if (sample.success === false) {
-          lossSeries.push({ value: [ts, 0] });
-        }
-      }
-    });
-
-  if (rttSeries.length === 0 && lossSeries.length === 0) {
+  if (!state.selectedTarget) {
     setChartEmptyState("latencyChart", true);
     charts.latency.setOption({
       yAxis: { min: 0, max: 1 },
       series: [{ data: [] }, { data: [] }],
-    });
-    return;
+    }, false, true);
+    latencyChartState.target = null;
+    latencyChartState.fingerprint = "";
+    latencyChartState.rangeMs = 0;
+    return true;
+  }
+  const samples = state.pingSamples.get(state.selectedTarget) || [];
+  const now = Date.now();
+  const rangeMs = state.rangeMinutes * 60 * 1000;
+  const cutoff = now - rangeMs;
+  const target = state.selectedTarget;
+  const seriesPayload = buildLatencySeries(samples, cutoff);
+  const fingerprint = seriesPayload.fingerprint;
+  const needsUpdate =
+    latencyChartState.target !== target ||
+    latencyChartState.rangeMs !== rangeMs ||
+    latencyChartState.fingerprint !== fingerprint;
+
+  if (!needsUpdate) {
+    return true;
+  }
+
+  latencyChartState.target = target;
+  latencyChartState.rangeMs = rangeMs;
+  latencyChartState.fingerprint = fingerprint;
+
+  if (seriesPayload.rttSeries.length === 0 && seriesPayload.lossSeries.length === 0) {
+    setChartEmptyState("latencyChart", true);
+    charts.latency.setOption({
+      yAxis: { min: 0, max: 1 },
+      series: [{ data: [] }, { data: [] }],
+    }, false, true);
+    return true;
   }
 
   setChartEmptyState("latencyChart", false);
 
-  const hasRtt = rttValues.length > 0;
-  const maxRtt = hasRtt ? Math.max(...rttValues) : null;
-  const padding = hasRtt ? Math.max(maxRtt * 0.15, 5) : 5;
-  const axisMax = hasRtt ? Math.max(maxRtt + padding, maxRtt * 1.15) : padding;
-  const resolvedAxisMax = Number.isFinite(axisMax) ? Math.max(axisMax, 1) : 1;
+  const resolvedAxisMax = computeLatencyAxisMax(seriesPayload.maxRtt);
 
-  charts.latency.setOption({
-    yAxis: { min: 0, max: resolvedAxisMax },
-    series: [{ data: rttSeries }, { data: lossSeries }],
-  });
+  charts.latency.setOption(
+    {
+      yAxis: { min: 0, max: resolvedAxisMax },
+      series: [{ data: seriesPayload.rttSeries }, { data: seriesPayload.lossSeries }],
+    },
+    false,
+    true
+  );
+  return true;
+}
+
+function buildLatencySeries(samples, cutoff) {
+  const rttSeries = [];
+  const lossSeries = [];
+  const list = Array.isArray(samples) ? samples : [];
+  let maxRtt = null;
+  let count = 0;
+  let firstTs = null;
+  let lastTs = null;
+  let hash = 0;
+
+  for (let i = 0; i < list.length; i += 1) {
+    const sample = list[i];
+    const ts = Number(sample?.ts);
+    if (!Number.isFinite(ts) || ts < cutoff) {
+      continue;
+    }
+    if (firstTs == null) {
+      firstTs = ts;
+    }
+    lastTs = ts;
+    count += 1;
+
+    let encodedValue = -1;
+    if (sample?.success && Number.isFinite(sample?.rtt)) {
+      const value = Number(sample.rtt);
+      rttSeries.push({ value: [ts, value] });
+      maxRtt = maxRtt == null ? value : Math.max(maxRtt, value);
+      encodedValue = Math.round(value * 100);
+    } else {
+      rttSeries.push({ value: [ts, null] });
+      if (sample?.success === false) {
+        lossSeries.push({ value: [ts, 0] });
+      }
+    }
+
+    hash = hashLatencyFingerprint(hash, ts, encodedValue, sample?.success === false);
+  }
+
+  const fingerprint = `${count}|${firstTs ?? 0}|${lastTs ?? 0}|${hash >>> 0}`;
+  return { rttSeries, lossSeries, maxRtt, fingerprint };
+}
+
+function hashLatencyFingerprint(current, ts, encodedValue, isLoss) {
+  let hash = current | 0;
+  hash = ((hash << 5) - hash + (ts & 0xffff)) | 0;
+  const coarseTs = Math.floor(ts / 1000);
+  hash = ((hash << 5) - hash + (coarseTs & 0xffff)) | 0;
+  hash = ((hash << 5) - hash + (encodedValue & 0xffff)) | 0;
+  if (isLoss) {
+    hash = ((hash << 5) - hash + 1) | 0;
+  }
+  return hash;
+}
+
+function computeLatencyAxisMax(maxRtt) {
+  if (!Number.isFinite(maxRtt)) {
+    return 5;
+  }
+  const padding = Math.max(maxRtt * 0.15, 5);
+  const axisMax = Math.max(maxRtt + padding, maxRtt * 1.15);
+  const resolved = Number.isFinite(axisMax) ? axisMax : maxRtt + padding;
+  return Math.max(resolved, 1);
 }
 
 function renderHeatmap() {
@@ -2271,9 +2378,13 @@ function renderHeatmap() {
       return [item.ts, normalizedIndex, item.p95, item.samples];
     });
   setChartEmptyState("heatmapChart", data.length === 0);
-  charts.heatmap.setOption({
-    series: [{ data }],
-  });
+  charts.heatmap.setOption(
+    {
+      series: [{ data }],
+    },
+    false,
+    true
+  );
 }
 
 function renderSparkline(chart, list) {
@@ -2285,13 +2396,23 @@ function renderSparkline(chart, list) {
     (count, [, value]) => (Number.isFinite(value) ? count + 1 : count),
     0
   );
+  const empty = numericCount === 0;
+  const fingerprint = buildSparklineFingerprint(raw);
+  const cache = sparklineCache.get(chart);
+  const id = chart.getDom()?.id;
+  if (cache && cache.fingerprint === fingerprint && cache.empty === empty) {
+    if (id) {
+      setChartEmptyState(id, empty);
+    }
+    return;
+  }
+  if (id) {
+    setChartEmptyState(id, empty);
+  }
   const data =
     SPARKLINE_EWMA_ALPHA != null ? applySparklineSmoothing(raw, SPARKLINE_EWMA_ALPHA) : raw;
-  const id = chart.getDom()?.id;
-  if (id) {
-    setChartEmptyState(id, numericCount === 0);
-  }
-  chart.setOption({ series: [{ data }] });
+  chart.setOption({ series: [{ data }] }, false, true);
+  sparklineCache.set(chart, { fingerprint, empty });
 }
 
 function applySparklineSmoothing(points, alpha) {
@@ -2306,6 +2427,29 @@ function applySparklineSmoothing(points, alpha) {
     }
     return [ts, null];
   });
+}
+
+function buildSparklineFingerprint(points) {
+  if (!points.length) {
+    return "0|0|0|0";
+  }
+  let hash = 0;
+  let firstTs = null;
+  let lastTs = null;
+  for (let i = 0; i < points.length; i += 1) {
+    const [ts, value] = points[i];
+    if (!Number.isFinite(ts)) {
+      continue;
+    }
+    if (firstTs == null) {
+      firstTs = ts;
+    }
+    lastTs = ts;
+    const encoded = Number.isFinite(value) ? Math.round(value * 100) : -1;
+    hash = ((hash << 5) - hash + (ts & 0xffff)) | 0;
+    hash = ((hash << 5) - hash + (encoded & 0xffff)) | 0;
+  }
+  return `${points.length}|${firstTs ?? 0}|${lastTs ?? 0}|${hash >>> 0}`;
 }
 
 function updateConnectionStatus() {
@@ -2399,13 +2543,16 @@ async function fetchPingWindowData(target, rangeKey, options = {}) {
           }))
           .filter((row) => Number.isFinite(row.ts))
       : [];
+    let samplesMerged = false;
     if (samples.length) {
       const existing = state.pingSamples.get(target) ?? [];
       const merged = options.mergeSamples ? mergeSampleSeries(existing, samples) : mergeSampleSeries([], samples);
       state.pingSamples.set(target, merged);
       state.latestSampleTs.set(target, merged.length ? merged[merged.length - 1].ts : null);
+      samplesMerged = true;
     } else if (!state.pingSamples.has(target)) {
       state.pingSamples.set(target, []);
+      samplesMerged = true;
     }
 
     const aggregates = Array.isArray(payload.aggregates)
@@ -2438,6 +2585,10 @@ async function fetchPingWindowData(target, rangeKey, options = {}) {
 
     if (options.updateVisibleSummary) {
       applyCurrentWindowSummary();
+    }
+
+    if (target === state.selectedTarget && samplesMerged) {
+      markLatencyChartDirty();
     }
 
     scheduleRender();
