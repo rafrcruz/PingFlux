@@ -55,6 +55,12 @@ const HISTORY_LIMIT_MS = MAX_RANGE_MINUTES * 60 * 1000;
 const DNS_HISTORY_LIMIT_MS = 60 * 60 * 1000;
 const MIN_WINDOW_SAMPLES = 3;
 
+const GAUGE_COLOR_OK = "#3fb950";
+const GAUGE_COLOR_WARN = "#d29922";
+const GAUGE_COLOR_CRIT = "#f85149";
+const GAUGE_COLOR_NEUTRAL = "#64748b";
+
+
 const thresholds = CONFIG.thresholds ?? {};
 const HEATMAP_ENABLED = Boolean(CONFIG.UI_ENABLE_HEATMAP);
 const initialViewportWidth =
@@ -877,10 +883,6 @@ function configureHeatmap() {
   });
 }
 
-const GAUGE_COLOR_OK = "#3fb950";
-const GAUGE_COLOR_WARN = "#d29922";
-const GAUGE_COLOR_CRIT = "#f85149";
-const GAUGE_COLOR_NEUTRAL = "#64748b";
 
 function configureGauges() {
   const labelColor = getCssVar("--text-muted", "#94a3b8");
@@ -2954,3 +2956,4 @@ function clampGaugeValue(value) {
   }
   return Math.min(100, Math.max(0, value));
 }
+
