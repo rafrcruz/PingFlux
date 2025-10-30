@@ -233,10 +233,22 @@ function handleResize() {
 
 const kpiCards = Array.from(document.querySelectorAll(".kpi-card")).map((card) => {
   const key = card.getAttribute("data-kpi");
+  const valueEl = card.querySelector("[data-value]");
+  const subEl = card.querySelector("[data-sub]");
+  if (valueEl) {
+    const initialValue = valueEl.textContent ? valueEl.textContent.trim() : "";
+    valueEl.dataset.displayValue = initialValue || "—";
+  }
+  if (subEl) {
+    const initialSub = subEl.textContent ? subEl.textContent.trim() : "";
+    subEl.dataset.displaySub = initialSub;
+  }
   return {
     key,
     element: card,
-    valueEl: card.querySelector("[data-value]"),
+    valueEl,
+    subEl,
+    defaultSub: subEl ? subEl.textContent.trim() : "",
     trendEl: card.querySelector(".trend-label"),
     arrowEl: card.querySelector(".trend-arrow"),
   };
@@ -1714,24 +1726,45 @@ function updateKpis(summary) {
   updateNetworkStatus(summary);
 }
 
-function renderKpiValue(element, valueText) {
-  if (!element) {
+function renderKpiValue(card, valueText) {
+  if (!card || !card.valueEl) {
     return;
   }
-  if (!valueText || valueText === "—") {
+  const element = card.valueEl;
+  const normalized = typeof valueText === "string"
+    ? valueText.trim()
+    : valueText == null
+      ? ""
+      : String(valueText);
+  const displayValue = normalized || "—";
+  if (element.dataset.displayValue === displayValue) {
+    return;
+  }
+  element.dataset.displayValue = displayValue;
+  if (displayValue === "—") {
     element.textContent = "—";
+    element.classList.remove("has-unit");
+    element.removeAttribute("data-unit");
     return;
   }
-  const normalized = String(valueText).trim();
-  const match = normalized.match(/^([+-]?[0-9.,]+)(?:\s?([a-z%°µ]+))?$/i);
+  const match = displayValue.match(/^([+-]?[0-9.,]+)(?:\s*([a-z%°µ]+))?$/i);
   if (!match) {
-    element.textContent = normalized;
+    element.textContent = displayValue;
+    element.classList.remove("has-unit");
+    element.removeAttribute("data-unit");
     return;
   }
   const [, numberPart, unitPart] = match;
   const numberSpan = `<span class="value-number">${numberPart}</span>`;
   const unitSpan = unitPart ? `<span class="value-unit">${unitPart}</span>` : "";
   element.innerHTML = `${numberSpan}${unitSpan}`;
+  if (unitPart) {
+    element.classList.add("has-unit");
+    element.dataset.unit = unitPart;
+  } else {
+    element.classList.remove("has-unit");
+    element.removeAttribute("data-unit");
+  }
 }
 
 function getCurrentWindowSummary() {
@@ -1830,10 +1863,9 @@ function updateKpi(key, value, options = {}) {
   const formatter = typeof options.formatter === "function" ? options.formatter : fmtMs;
   const status = options.status;
   const isInsufficient = status === "insufficient";
-  const valueText = isInsufficient
-    ? STRINGS.insufficientSamples || "Amostra insuficiente"
-    : formatter(value);
-  renderKpiValue(card.valueEl, valueText);
+  const formattedValue = formatter(value);
+  const valueText = !isInsufficient && formattedValue !== "—" ? formattedValue : "—";
+  renderKpiValue(card, valueText);
   if (isInsufficient) {
     card.valueEl.setAttribute(
       "title",
@@ -1852,6 +1884,22 @@ function updateKpi(key, value, options = {}) {
     card.element.setAttribute("data-active", "true");
   } else {
     card.element.removeAttribute("data-active");
+  }
+
+  if (card.subEl) {
+    const desiredSubRaw = typeof options.subText === "string" ? options.subText.trim() : "";
+    const desiredSub = desiredSubRaw || card.defaultSub;
+    if (desiredSub) {
+      if (card.subEl.dataset.displaySub !== desiredSub) {
+        card.subEl.textContent = desiredSub;
+        card.subEl.dataset.displaySub = desiredSub;
+      }
+      card.subEl.hidden = false;
+    } else {
+      card.subEl.textContent = "";
+      card.subEl.dataset.displaySub = "";
+      card.subEl.hidden = true;
+    }
   }
   const severity = isInsufficient
     ? "info"

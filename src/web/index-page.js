@@ -125,6 +125,7 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
+            <div class="kpi-sub" data-sub>Janela de 1 minuto</div>
           </article>
 
           <article class="kpi-card" data-kpi="ping-p50" data-loading="true">
@@ -144,6 +145,7 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
+            <div class="kpi-sub" data-sub>Janela de 1 minuto</div>
           </article>
 
           <article class="kpi-card" data-kpi="ping-avg" data-loading="true">
@@ -163,6 +165,7 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
+            <div class="kpi-sub" data-sub>Janela de 1 minuto</div>
           </article>
 
           <article class="kpi-card" data-kpi="ping-loss" data-loading="true">
@@ -172,7 +175,7 @@ export function renderIndexPage(uiConfig, options = {}) {
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M19 5l-7 14-4-7-5 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
                 </span>
                 <div>
-                  <span class="kpi-title">Perda (1m)</span>
+                  <span class="kpi-title">Perda</span>
                   <button class="kpi-help" type="button" data-tooltip="pingLoss" aria-label="Ajuda perda">?</button>
                 </div>
               </div>
@@ -182,6 +185,7 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
+            <div class="kpi-sub" data-sub>Janela de 1 minuto</div>
           </article>
 
           <article class="kpi-card" data-kpi="ping-availability" data-loading="true">
@@ -191,7 +195,7 @@ export function renderIndexPage(uiConfig, options = {}) {
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M12 2v4m0 12v4m-8-8h4m8 0h4m-3.5-6.5l-2.8 2.8M8.3 8.3L5.5 5.5m0 12.9l2.8-2.8m8.9 0l2.8 2.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
                 </span>
                 <div>
-                  <span class="kpi-title">Disponibilidade (1m)</span>
+                  <span class="kpi-title">Disponibilidade</span>
                   <button class="kpi-help" type="button" data-tooltip="pingAvailability" aria-label="Ajuda disponibilidade">?</button>
                 </div>
               </div>
@@ -201,6 +205,7 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
+            <div class="kpi-sub" data-sub>Janela de 1 minuto</div>
           </article>
 
           <article class="kpi-card" data-kpi="dns-lookup" data-loading="true">
@@ -210,7 +215,7 @@ export function renderIndexPage(uiConfig, options = {}) {
                   <svg viewBox="0 0 24 24" focusable="false"><path d="M3 5h8v6H3zm10 0h8v6h-8zM3 13h8v6H3zm10 6v-6h8v6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
                 </span>
                 <div>
-                  <span class="kpi-title">DNS lookup (1m)</span>
+                  <span class="kpi-title">DNS lookup</span>
                   <button class="kpi-help" type="button" data-tooltip="dnsLookup" aria-label="Ajuda DNS">?</button>
                 </div>
               </div>
@@ -220,6 +225,47 @@ export function renderIndexPage(uiConfig, options = {}) {
               </div>
             </div>
             <div class="kpi-value" data-value>—</div>
+            <div class="kpi-sub" data-sub>Janela de 1 minuto</div>
+          </article>
+
+          <article class="kpi-card" data-kpi="http-ttfb" data-loading="true">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M4 7h16M6 12h12M8 17h8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">HTTP TTFB</span>
+                  <button class="kpi-help" type="button" data-tooltip="httpTtfb" aria-label="Ajuda HTTP TTFB">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="http-ttfb">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-sub" data-sub>Média de 1 minuto</div>
+          </article>
+
+          <article class="kpi-card" data-kpi="http-total" data-loading="true">
+            <div class="kpi-header">
+              <div class="kpi-label-group">
+                <span class="kpi-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false"><path d="M5 5h14v6H5zm0 8h9v6H5zm11 0h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </span>
+                <div>
+                  <span class="kpi-title">HTTP total</span>
+                  <button class="kpi-help" type="button" data-tooltip="httpTotal" aria-label="Ajuda HTTP total">?</button>
+                </div>
+              </div>
+              <div class="kpi-trend" data-trend="http-total">
+                <span class="trend-arrow" aria-hidden="true"></span>
+                <span class="trend-label">—</span>
+              </div>
+            </div>
+            <div class="kpi-value" data-value>—</div>
+            <div class="kpi-sub" data-sub>Média de 1 minuto</div>
           </article>
         </div>
       </section>
