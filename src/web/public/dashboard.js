@@ -17,6 +17,13 @@ const API_PING_WINDOW = ["/v1/api/ping/window", "/api/ping/window"];
 const API_TRACEROUTE_LATEST = ["/v1/api/traceroute/latest", "/api/traceroute/latest"];
 const API_TRACEROUTE_BY_ID = (id) => [`/v1/api/traceroute/${id}`, `/api/traceroute/${id}`];
 
+const DEFAULT_FETCH_TIMEOUT_MS = toPositiveInt(
+  CONFIG.API_FETCH_TIMEOUT_MS ?? CONFIG.apiFetchTimeoutMs,
+  12000
+);
+const RECONNECT_BASE_DELAY_MS = 3000;
+const RECONNECT_MAX_DELAY_MS = 30000;
+
 const DEFAULT_TARGET =
   typeof CONFIG.DEFAULT_TARGET === "string"
     ? CONFIG.DEFAULT_TARGET
@@ -113,6 +120,8 @@ const state = {
   connectedEndpointIndex: 0,
   reconnectAttempts: 0,
   lastUpdateTs: null,
+  awaitingRecovery: false,
+  recoveryInFlight: false,
   targets: [],
   selectedTarget: DEFAULT_TARGET || "",
   rangeMinutes: RANGE_OPTIONS[0],
@@ -324,6 +333,116 @@ let renderScheduled = false;
 let heatmapNeedsRefresh = false;
 let eventsRefreshTimer = null;
 let liveInactivityTimer = null;
+let recoveryTimer = null;
+
+function mergeAbortSignals(primary, secondary) {
+  if (!primary) {
+    return secondary;
+  }
+  if (!secondary) {
+    return primary;
+  }
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+    try {
+      return AbortSignal.any([primary, secondary]);
+    } catch (error) {
+      // Fallback to manual merging below.
+    }
+  }
+  const controller = new AbortController();
+  const forwardAbort = (signal) => {
+    if (!signal) {
+      return;
+    }
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      return;
+    }
+    signal.addEventListener(
+      "abort",
+      () => {
+        controller.abort(signal.reason);
+      },
+      { once: true }
+    );
+  };
+  forwardAbort(primary);
+  forwardAbort(secondary);
+  return controller.signal;
+}
+
+async function fetchWithTimeout(resource, options = {}) {
+  const { timeoutMs, signal, ...rest } = options;
+  const timeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_FETCH_TIMEOUT_MS;
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    return fetch(resource, { ...rest, signal });
+  }
+  const controller = new AbortController();
+  const mergedSignal = mergeAbortSignals(signal, controller.signal);
+  const timerId = window.setTimeout(() => {
+    try {
+      controller.abort();
+    } catch (error) {
+      // ignore
+    }
+  }, timeout);
+  try {
+    return await fetch(resource, { ...rest, signal: mergedSignal });
+  } finally {
+    window.clearTimeout(timerId);
+  }
+}
+
+function handleNetworkError(error, context) {
+  const label = context || "Falha de comunicação com o backend";
+  console.error(label, error);
+  state.awaitingRecovery = true;
+  scheduleReconnect();
+}
+
+function schedulePostReconnectSync() {
+  if (state.recoveryInFlight) {
+    return;
+  }
+  if (recoveryTimer) {
+    return;
+  }
+  recoveryTimer = window.setTimeout(() => {
+    recoveryTimer = null;
+    runPostReconnectSync().catch(() => {});
+  }, 120);
+}
+
+async function runPostReconnectSync() {
+  if (state.recoveryInFlight) {
+    return;
+  }
+  const targets = Array.isArray(state.targets) && state.targets.length > 0
+    ? state.targets.slice()
+    : state.selectedTarget
+      ? [state.selectedTarget]
+      : [];
+  if (targets.length === 0) {
+    return;
+  }
+  state.recoveryInFlight = true;
+  try {
+    const rangeKey = getRangeParamFromMinutes(state.rangeMinutes);
+    for (const target of targets) {
+      const isSelected = target === state.selectedTarget;
+      const baseSuccess = await fetchPingWindowData(target, "60m", { mergeSamples: false });
+      const windowSuccess = await fetchPingWindowData(target, rangeKey, {
+        mergeSamples: true,
+        updateVisibleSummary: isSelected,
+      });
+      if (isSelected && (baseSuccess || windowSuccess)) {
+        fetchTraceroute(target).catch(() => {});
+      }
+    }
+  } finally {
+    state.recoveryInFlight = false;
+  }
+}
 
 init();
 
@@ -1177,6 +1296,7 @@ function handleLiveInactivity() {
   }
   state.connection = "reconnecting";
   updateConnectionStatus();
+  state.awaitingRecovery = true;
   closeLiveStream();
   scheduleReconnect();
 }
@@ -1198,6 +1318,7 @@ function tryNextEndpoint(startIndex) {
   let index = startIndex;
   const tryConnect = () => {
     if (index >= endpoints.length) {
+      state.awaitingRecovery = true;
       scheduleReconnect();
       return;
     }
@@ -1214,11 +1335,16 @@ function tryNextEndpoint(startIndex) {
     let opened = false;
     eventSource.onopen = () => {
       opened = true;
+      const shouldRecover = state.awaitingRecovery || state.connection === "reconnecting";
       state.connection = "connected";
       state.connectedEndpointIndex = index;
       state.reconnectAttempts = 0;
+      state.awaitingRecovery = false;
       updateConnectionStatus();
       scheduleLiveInactivityTimer();
+      if (shouldRecover) {
+        schedulePostReconnectSync();
+      }
     };
 
     eventSource.onmessage = (event) => {
@@ -1237,8 +1363,7 @@ function tryNextEndpoint(startIndex) {
         tryConnect();
         return;
       }
-      state.connection = "reconnecting";
-      updateConnectionStatus();
+      state.awaitingRecovery = true;
       scheduleReconnect();
     };
   };
@@ -1246,18 +1371,19 @@ function tryNextEndpoint(startIndex) {
 }
 
 function scheduleReconnect() {
+  state.connection = "reconnecting";
+  updateConnectionStatus();
   if (reconnectTimer) {
     return;
   }
   state.reconnectAttempts += 1;
-  const attempt = Math.min(state.reconnectAttempts, 3);
-  const delay = [3000, 6000, 10000][attempt - 1] ?? 10000;
+  const attempt = Math.max(1, state.reconnectAttempts);
+  const exponentialDelay = RECONNECT_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+  const delay = Math.min(exponentialDelay, RECONNECT_MAX_DELAY_MS);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     openLiveStream();
   }, delay);
-  state.connection = "reconnecting";
-  updateConnectionStatus();
 }
 
 function closeLiveStream() {
@@ -1273,6 +1399,10 @@ function closeLiveStream() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+  if (recoveryTimer) {
+    clearTimeout(recoveryTimer);
+    recoveryTimer = null;
   }
 }
 
@@ -2197,18 +2327,18 @@ function updateLastUpdate() {
 
 async function fetchPingWindowData(target, rangeKey, options = {}) {
   if (!target) {
-    return;
+    return false;
   }
   const rangeParam = typeof rangeKey === "string" && rangeKey ? rangeKey : getRangeParamFromMinutes(state.rangeMinutes);
   try {
     const url = await resolveEndpoint(API_PING_WINDOW, { range: rangeParam, target });
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
     const payload = await response.json();
     if (!payload || typeof payload !== "object") {
-      return;
+      return false;
     }
 
     const resolvedRangeKey = getWindowKeyFromRange(payload.range ?? rangeParam);
@@ -2263,8 +2393,10 @@ async function fetchPingWindowData(target, rangeKey, options = {}) {
     }
 
     scheduleRender();
+    return true;
   } catch (error) {
-    console.error("Falha ao buscar dados da janela de ping:", error);
+    handleNetworkError(error, "Falha ao buscar dados da janela de ping");
+    return false;
   }
 }
 
@@ -2325,7 +2457,7 @@ async function fetchTraceroute(target) {
   }
   try {
     const url = await resolveEndpoint(API_TRACEROUTE_LATEST, { target });
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) {
       if (response.status === 404) {
         state.traceroute = null;
@@ -2474,7 +2606,7 @@ async function triggerTraceroute(target) {
   }
   renderTraceroute();
   try {
-    const response = await fetch("/actions/traceroute", {
+    const response = await fetchWithTimeout("/actions/traceroute", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target }),
@@ -2506,7 +2638,7 @@ async function triggerTraceroute(target) {
 async function fetchTracerouteById(id) {
   for (const endpoint of API_TRACEROUTE_BY_ID(id)) {
     try {
-      const response = await fetch(endpoint);
+      const response = await fetchWithTimeout(endpoint);
       if (!response.ok) {
         continue;
       }
@@ -2542,7 +2674,7 @@ async function resolveEndpoint(paths, params = {}) {
       }
     });
     try {
-      const res = await fetch(url, { method: "HEAD" });
+      const res = await fetchWithTimeout(url, { method: "HEAD", timeoutMs: 4000 });
       if (res.ok) {
         return url;
       }
