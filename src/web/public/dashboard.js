@@ -551,6 +551,9 @@ function configureLatencyChart() {
   const axisLabelColor = getCssVar("--chart-axis-label", "rgba(226, 232, 240, 0.92)");
   const axisLineColor = getCssVar("--chart-axis-line", "rgba(148, 163, 184, 0.45)");
   const gridLineColor = getCssVar("--chart-grid-line", "rgba(148, 163, 184, 0.24)");
+  const tooltipBg = getCssVar("--chart-tooltip-bg", "rgba(15, 23, 42, 0.94)");
+  const tooltipText = getCssVar("--chart-tooltip-text", "#e5e7eb");
+  const accentColor = getCssVar("--accent", "#58a6ff");
   charts.latency.setOption({
     backgroundColor: "transparent",
     animationDuration: 260,
@@ -558,17 +561,20 @@ function configureLatencyChart() {
       bottom: 0,
       textStyle: {
         color: legendColor,
-        fontSize: 11,
+        fontSize: 12,
+        fontWeight: 500,
       },
       data: ["RTT por amostra", "Perda"],
     },
     grid: { left: 52, right: 32, top: 40, bottom: 70, containLabel: true },
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "line", lineStyle: { color: axisLineColor, width: 1.2 } },
-      backgroundColor: "rgba(15, 23, 42, 0.88)",
+      axisPointer: { type: "line", lineStyle: { color: axisLineColor, width: 1.4 } },
+      backgroundColor: tooltipBg,
+      borderColor: "transparent",
       borderWidth: 0,
-      textStyle: { color: "#e2e8f0" },
+      padding: 12,
+      textStyle: { color: tooltipText, fontSize: 12, lineHeight: 20 },
       formatter: (params) => {
         if (!params || params.length === 0) {
           return STRINGS.noData || "Sem dados suficientes no período.";
@@ -599,13 +605,22 @@ function configureLatencyChart() {
     },
     dataZoom: [
       { type: "inside", throttle: 50 },
-      { type: "slider", bottom: 24, textStyle: { color: "#94a3b8" } },
+      {
+        type: "slider",
+        bottom: 24,
+        brushSelect: false,
+        textStyle: { color: legendColor, fontSize: 12 },
+        borderColor: axisLineColor,
+        handleStyle: { color: accentColor, borderColor: accentColor },
+        fillerColor: hexToRgba(accentColor, 0.16),
+        backgroundColor: hexToRgba(accentColor, 0.04),
+      },
     ],
     xAxis: {
       type: "time",
       boundaryGap: false,
       axisLine: { lineStyle: { color: axisLineColor } },
-      axisLabel: { color: axisLabelColor, hideOverlap: true, fontSize: 11 },
+      axisLabel: { color: axisLabelColor, hideOverlap: true, fontSize: 12, margin: 16 },
       splitNumber: 6,
       splitLine: { lineStyle: { color: gridLineColor } },
       axisTick: { show: false },
@@ -615,11 +630,12 @@ function configureLatencyChart() {
       name: "ms",
       min: 0,
       splitNumber: 6,
-      nameTextStyle: { color: axisLabelColor, fontSize: 11 },
+      nameTextStyle: { color: axisLabelColor, fontSize: 12, padding: [0, 0, 0, 8] },
       axisLine: { show: true, lineStyle: { color: axisLineColor } },
       axisLabel: {
         color: axisLabelColor,
-        fontSize: 11,
+        fontSize: 12,
+        margin: 16,
         formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)} ms` : value),
       },
       splitLine: { lineStyle: { color: gridLineColor } },
@@ -656,6 +672,12 @@ function configureHeatmap() {
   if (!charts.heatmap) {
     return;
   }
+  const axisLabelColor = getCssVar("--chart-axis-label", "rgba(226, 232, 240, 0.92)");
+  const axisLineColor = getCssVar("--chart-axis-line", "rgba(148, 163, 184, 0.45)");
+  const gridLineColor = getCssVar("--chart-grid-line", "rgba(148, 163, 184, 0.24)");
+  const tooltipBg = getCssVar("--chart-tooltip-bg", "rgba(15, 23, 42, 0.94)");
+  const tooltipText = getCssVar("--chart-tooltip-text", "#e5e7eb");
+  const subtleText = getCssVar("--text-muted", "#94a3b8");
   charts.heatmap.setOption({
     tooltip: {
       formatter: (params) => {
@@ -665,23 +687,25 @@ function configureHeatmap() {
         const [ts, , value, count] = params.value;
         return `${formatTime(ts)}<br/>p95: ${fmtMs(value)}<br/>Amostras: ${count ?? "n/d"}`;
       },
-      backgroundColor: "rgba(15, 23, 42, 0.88)",
+      backgroundColor: tooltipBg,
+      borderColor: "transparent",
       borderWidth: 0,
-      textStyle: { color: "#e2e8f0" },
+      padding: 12,
+      textStyle: { color: tooltipText, fontSize: 12, lineHeight: 20 },
     },
     grid: { left: 60, right: 24, bottom: 48, top: 30, containLabel: true },
     xAxis: {
       type: "time",
-      axisLabel: { color: "var(--text-muted)", fontSize: 11, hideOverlap: true },
-      axisLine: { lineStyle: { color: "rgba(148,163,184,0.25)" } },
-      splitLine: { show: false },
+      axisLabel: { color: axisLabelColor, fontSize: 12, hideOverlap: true, margin: 12 },
+      axisLine: { lineStyle: { color: axisLineColor } },
+      splitLine: { show: true, lineStyle: { color: gridLineColor } },
     },
     yAxis: {
       type: "category",
       data: HEAT_LABELS,
-      axisLabel: { color: "var(--text-muted)", fontSize: 11 },
-      axisLine: { lineStyle: { color: "rgba(148,163,184,0.25)" } },
-      splitLine: { show: false },
+      axisLabel: { color: axisLabelColor, fontSize: 12, margin: 14 },
+      axisLine: { lineStyle: { color: axisLineColor } },
+      splitLine: { show: true, lineStyle: { color: gridLineColor } },
     },
     visualMap: {
       min: 0,
@@ -692,7 +716,7 @@ function configureHeatmap() {
       inRange: {
         color: ["#0ea5e9", "#22c55e", "#f59e0b", "#ef4444"],
       },
-      textStyle: { color: "var(--text-muted)" },
+      textStyle: { color: subtleText, fontSize: 12 },
     },
     series: [
       {
@@ -713,8 +737,8 @@ const GAUGE_COLOR_NEUTRAL = "#64748b";
 function configureGauges() {
   const labelColor = getCssVar("--text-muted", "#94a3b8");
   const detailColor = getCssVar("--text-base", "#e6edf3");
-  const tickColor = "rgba(148, 163, 184, 0.35)";
-  const splitColor = "rgba(148, 163, 184, 0.45)";
+  const tickColor = getCssVar("--chart-gauge-tick", "rgba(148, 163, 184, 0.38)");
+  const splitColor = getCssVar("--chart-gauge-split", "rgba(148, 163, 184, 0.5)");
   const axisWidth = state.compactMode ? 14 : 18;
   const tickLength = state.compactMode ? 5 : 8;
   const splitLength = state.compactMode ? 10 : 14;
@@ -722,7 +746,7 @@ function configureGauges() {
   const detailFontSize = state.compactMode ? 22 : 30;
   const pointerWidth = state.compactMode ? 4 : 6;
   const anchorSize = state.compactMode ? 6 : 8;
-  const anchorColor = getCssVar("--chart-anchor", "#0f172a");
+  const anchorColor = getCssVar("--chart-anchor", "#111827");
 
   const baseSeries = {
     type: "gauge",
@@ -735,14 +759,20 @@ function configureGauges() {
     axisLine: { lineStyle: { width: axisWidth, color: [[1, GAUGE_COLOR_OK]] } },
     axisTick: { length: tickLength, distance: 0, lineStyle: { color: tickColor, width: 1 } },
     splitLine: { length: splitLength, distance: 0, lineStyle: { color: splitColor, width: 2 } },
-    axisLabel: { color: labelColor, distance: labelDistance, fontSize: state.compactMode ? 10 : 12 },
+    axisLabel: {
+      color: labelColor,
+      distance: labelDistance,
+      fontSize: state.compactMode ? 10 : 12,
+      fontWeight: 500,
+    },
     pointer: { show: true, length: "70%", width: pointerWidth, itemStyle: { color: GAUGE_COLOR_OK } },
     anchor: { show: true, showAbove: true, size: anchorSize, itemStyle: { color: anchorColor } },
     detail: {
       fontSize: detailFontSize,
       fontWeight: 600,
       color: detailColor,
-      offsetCenter: [0, "50%"],
+      lineHeight: Math.round(detailFontSize * 1.2),
+      offsetCenter: [0, "52%"],
       valueAnimation: true,
       formatter: () => "—",
     },
@@ -1057,6 +1087,9 @@ function configureSparkline(chart, color) {
   if (!chart) {
     return;
   }
+  const tooltipBg = getCssVar("--chart-tooltip-bg", "rgba(15, 23, 42, 0.9)");
+  const tooltipText = getCssVar("--chart-tooltip-text", "#e5e7f0");
+  const axisLineColor = getCssVar("--chart-axis-line", "rgba(148, 163, 184, 0.45)");
   chart.setOption({
     grid: { left: 10, right: 10, top: 10, bottom: 10 },
     xAxis: {
@@ -1071,7 +1104,7 @@ function configureSparkline(chart, color) {
     },
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "line" },
+      axisPointer: { type: "line", lineStyle: { color: axisLineColor, width: 1.2 } },
       formatter: (params) => {
         if (!params || !params.length) {
           return STRINGS.noData || "Sem dados suficientes no período.";
@@ -1080,9 +1113,11 @@ function configureSparkline(chart, color) {
         const value = Array.isArray(item.value) ? item.value[1] : item.value;
         return `${formatTime(item.value[0])}<br/>${fmtMs(value)}`;
       },
-      backgroundColor: "rgba(15, 23, 42, 0.9)",
+      backgroundColor: tooltipBg,
+      borderColor: "transparent",
       borderWidth: 0,
-      textStyle: { color: "#e2e8f0" },
+      padding: 10,
+      textStyle: { color: tooltipText, fontSize: 11 },
     },
     series: [
       {
@@ -2134,6 +2169,16 @@ function updateConnectionStatus() {
   }
   refs.connectionDot.className = `status-dot ${dotClass}`.trim();
   refs.connectionText.textContent = text;
+  const indicator = refs.connectionText.closest?.(".live-indicator");
+  if (indicator) {
+    const indicatorState =
+      state.connection === "connected" && hasFreshData
+        ? "active"
+        : hasLiveData
+          ? "stale"
+          : "pending";
+    indicator.setAttribute("data-state", indicatorState);
+  }
 }
 
 function updateLastUpdate() {
