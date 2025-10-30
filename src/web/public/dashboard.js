@@ -46,6 +46,7 @@ const WINDOW_OPTION_MAP = new Map(
 const MAX_RANGE_MINUTES = RANGE_OPTIONS.reduce((max, value) => (value > max ? value : max), 60);
 const HISTORY_LIMIT_MS = MAX_RANGE_MINUTES * 60 * 1000;
 const DNS_HISTORY_LIMIT_MS = 60 * 60 * 1000;
+const MIN_WINDOW_SAMPLES = 3;
 
 const thresholds = CONFIG.thresholds ?? {};
 const HEATMAP_ENABLED = Boolean(CONFIG.UI_ENABLE_HEATMAP);
@@ -1602,14 +1603,22 @@ function buildSummaryFromMetrics(metrics, key) {
       status: "insufficient",
     };
   }
+  const samples = Number(entry.count ?? entry.samples) || 0;
+  const rawStatus =
+    typeof entry.status === "string" && entry.status
+      ? entry.status
+      : samples > 0
+        ? "ok"
+        : "insufficient";
+  const status = samples >= MIN_WINDOW_SAMPLES && rawStatus !== "insufficient" ? rawStatus : "insufficient";
   return {
     win_p95_ms: normalize(entry.p95_ms),
     win_p50_ms: normalize(entry.p50_ms),
     win_avg_ms: normalize(entry.avg_ms),
     win_loss_pct: normalize(entry.loss_pct),
     win_availability_pct: normalize(entry.disponibilidade_pct ?? entry.availability_pct),
-    win_samples: Number(entry.count ?? entry.samples) || 0,
-    status: typeof entry.status === "string" ? entry.status : Number(entry.count ?? entry.samples) > 0 ? "ok" : "insufficient",
+    win_samples: samples,
+    status,
   };
 }
 
