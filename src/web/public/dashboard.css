@@ -484,23 +484,12 @@ body {
   gap: 12px;
 }
 
-/* Grid principal de KPIs com 6 cards fixos */
+/* Grid principal de KPIs responsivo */
 .kpi-grid {
   display: grid;
   gap: var(--grid-gap);
-  grid-template-columns: repeat(1, minmax(0, 1fr));
-}
-
-@media (min-width: 768px) {
-  .kpi-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
-@media (min-width: 1280px) {
-  .kpi-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-  }
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: stretch;
 }
 
 .kpi-card {
@@ -513,7 +502,7 @@ body {
   box-shadow: var(--shadow-sm);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
   transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition),
     background var(--transition);
 }
@@ -593,11 +582,13 @@ body {
   font-size: clamp(2rem, 2.8vw, 2.2rem);
   display: flex;
   align-items: baseline;
+  justify-content: center;
   gap: 8px;
   font-variant-numeric: tabular-nums;
   position: relative;
   min-height: 2.2rem;
   transition: color var(--transition), transform var(--transition);
+  text-align: center;
 }
 
 .value-number {
@@ -682,6 +673,18 @@ body {
 
 .kpi-card[data-loading="true"] .kpi-value::after {
   height: 1.1em;
+}
+
+.kpi-sub {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-align: center;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+.kpi-value.has-unit .value-unit {
+  margin-left: 4px;
 }
 
 .kpi-card[data-loading="true"] .kpi-sub::after {
@@ -1018,6 +1021,10 @@ body.is-compact .kpi-card {
 
 body.is-compact .kpi-value {
   font-size: clamp(1.45rem, 5vw, 1.6rem);
+}
+
+body.is-compact .kpi-sub {
+  font-size: 0.72rem;
 }
 
 body.is-compact .chart-large {
