@@ -549,22 +549,25 @@ function configureLatencyChart() {
   if (!charts.latency) {
     return;
   }
+  const legendColor = getCssVar("--text-muted", "#cbd5f5");
+  const axisLabelColor = getCssVar("--chart-axis-label", "rgba(226, 232, 240, 0.92)");
+  const axisLineColor = getCssVar("--chart-axis-line", "rgba(148, 163, 184, 0.45)");
+  const gridLineColor = getCssVar("--chart-grid-line", "rgba(148, 163, 184, 0.24)");
   charts.latency.setOption({
     backgroundColor: "transparent",
     animationDuration: 260,
     legend: {
       bottom: 0,
       textStyle: {
-        color:
-          getComputedStyle(document.documentElement).getPropertyValue("--text-muted") || "#94a3b8",
+        color: legendColor,
         fontSize: 11,
       },
       data: ["RTT por amostra", "Perda"],
     },
-    grid: { left: 48, right: 32, top: 40, bottom: 70, containLabel: true },
+    grid: { left: 52, right: 32, top: 40, bottom: 70, containLabel: true },
     tooltip: {
       trigger: "axis",
-      axisPointer: { type: "line" },
+      axisPointer: { type: "line", lineStyle: { color: axisLineColor, width: 1.2 } },
       backgroundColor: "rgba(15, 23, 42, 0.88)",
       borderWidth: 0,
       textStyle: { color: "#e2e8f0" },
@@ -603,10 +606,10 @@ function configureLatencyChart() {
     xAxis: {
       type: "time",
       boundaryGap: false,
-      axisLine: { lineStyle: { color: "rgba(148, 163, 184, 0.3)" } },
-      axisLabel: { color: "var(--text-muted)", hideOverlap: true, fontSize: 11 },
+      axisLine: { lineStyle: { color: axisLineColor } },
+      axisLabel: { color: axisLabelColor, hideOverlap: true, fontSize: 11 },
       splitNumber: 6,
-      splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.15)" } },
+      splitLine: { lineStyle: { color: gridLineColor } },
       axisTick: { show: false },
     },
     yAxis: {
@@ -614,24 +617,28 @@ function configureLatencyChart() {
       name: "ms",
       min: 0,
       splitNumber: 6,
-      nameTextStyle: { color: "var(--text-muted)", fontSize: 11 },
+      nameTextStyle: { color: axisLabelColor, fontSize: 11 },
+      axisLine: { show: true, lineStyle: { color: axisLineColor } },
       axisLabel: {
-        color: "var(--text-muted)",
+        color: axisLabelColor,
         fontSize: 11,
         formatter: (value) => (Number.isFinite(value) ? `${fmtNumber(value, 1)} ms` : value),
       },
-      splitLine: { lineStyle: { color: "rgba(148, 163, 184, 0.12)" } },
+      splitLine: { lineStyle: { color: gridLineColor } },
     },
     series: [
       {
         name: "RTT por amostra",
         type: "line",
         step: false,
-        showSymbol: false,
+        showSymbol: true,
+        symbol: "circle",
         symbolSize: 6,
-        smooth: 0.4,
+        smooth: 0.35,
+        connectNulls: false,
         lineStyle: { width: 2, color: "#38bdf8" },
-        emphasis: { focus: "series" },
+        itemStyle: { color: "#38bdf8", borderColor: "#0ea5e9", borderWidth: 1.5 },
+        emphasis: { focus: "series", scale: 1.3 },
         data: [],
       },
       {
@@ -639,7 +646,8 @@ function configureLatencyChart() {
         type: "scatter",
         symbol: "triangle",
         symbolSize: 12,
-        itemStyle: { color: "#f87171" },
+        symbolRotate: 180,
+        itemStyle: { color: "#f87171", borderColor: "#fecaca", borderWidth: 1 },
         data: [],
       },
     ],
@@ -1786,19 +1794,26 @@ function renderLatencyChart() {
   const lossSeries = [];
   const rttValues = [];
 
-  filtered.forEach((sample) => {
-    const ts = Number(sample.ts);
-    if (!Number.isFinite(ts)) {
-      return;
-    }
-    if (sample.success && Number.isFinite(sample.rtt)) {
-      const value = Number(sample.rtt);
-      rttSeries.push([ts, value]);
-      rttValues.push(value);
-    } else if (!sample.success) {
-      lossSeries.push([ts, 0]);
-    }
-  });
+  filtered
+    .slice()
+    .sort((a, b) => Number(a.ts) - Number(b.ts))
+    .forEach((sample) => {
+      const ts = Number(sample.ts);
+      if (!Number.isFinite(ts)) {
+        return;
+      }
+
+      if (sample.success && Number.isFinite(sample.rtt)) {
+        const value = Number(sample.rtt);
+        rttSeries.push({ value: [ts, value] });
+        rttValues.push(value);
+      } else {
+        rttSeries.push({ value: [ts, null] });
+        if (sample.success === false) {
+          lossSeries.push({ value: [ts, 0] });
+        }
+      }
+    });
 
   if (rttSeries.length === 0 && lossSeries.length === 0) {
     setChartEmptyState("latencyChart", true);
@@ -1811,15 +1826,14 @@ function renderLatencyChart() {
 
   setChartEmptyState("latencyChart", false);
 
-  let minValue = 0;
-  let maxValue = 1;
-  if (rttValues.length > 0) {
-    const maxRtt = Math.max(...rttValues);
-    maxValue = Math.max(maxRtt * 1.1, 1);
-  }
+  const hasRtt = rttValues.length > 0;
+  const maxRtt = hasRtt ? Math.max(...rttValues) : null;
+  const padding = hasRtt ? Math.max(maxRtt * 0.15, 5) : 5;
+  const axisMax = hasRtt ? Math.max(maxRtt + padding, maxRtt * 1.15) : padding;
+  const resolvedAxisMax = Number.isFinite(axisMax) ? Math.max(axisMax, 1) : 1;
 
   charts.latency.setOption({
-    yAxis: { min: minValue, max: maxValue },
+    yAxis: { min: 0, max: resolvedAxisMax },
     series: [{ data: rttSeries }, { data: lossSeries }],
   });
 }
