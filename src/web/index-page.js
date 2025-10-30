@@ -251,7 +251,7 @@ export function renderIndexPage(uiConfig, options = {}) {
           <section class="panel panel-gauge" aria-label="Disponibilidade">
             <div class="panel-header">
               <h2>Disponibilidade</h2>
-              <span class="panel-subtitle" data-window-label="availability">Janela atual</span>
+              <span class="panel-subtitle">Média móvel de 1 minuto</span>
             </div>
             <div id="availabilityGauge" class="chart chart-gauge" role="img" aria-label="Gauge de disponibilidade"></div>
           </section>
@@ -259,9 +259,9 @@ export function renderIndexPage(uiConfig, options = {}) {
           <section class="panel panel-mini" aria-label="DNS Lookup">
             <div class="panel-header">
               <h2>DNS Lookup</h2>
-              <span class="panel-subtitle" data-window-label="dns">Janela atual</span>
+              <span class="panel-subtitle">Média móvel de 1 minuto</span>
             </div>
-            <div id="dnsSparkline" class="chart chart-mini" role="img" aria-label="Série de lookup DNS"></div>
+            <div id="dnsGauge" class="chart chart-gauge" role="img" aria-label="Gauge de tempo de lookup DNS"></div>
           </section>
         </div>
 
@@ -277,9 +277,9 @@ export function renderIndexPage(uiConfig, options = {}) {
           <section class="panel panel-mini" aria-label="HTTP Tempo total">
             <div class="panel-header">
               <h2>HTTP Tempo total</h2>
-              <span class="panel-subtitle">Últimos 60 min</span>
+              <span class="panel-subtitle">Média móvel de 1 minuto</span>
             </div>
-            <div id="httpTotalSparkline" class="chart chart-mini" role="img" aria-label="Série de tempo total HTTP"></div>
+            <div id="httpGauge" class="chart chart-gauge" role="img" aria-label="Gauge de tempo total HTTP"></div>
           </section>
 
           <section class="panel panel-events" aria-label="Eventos e alertas">

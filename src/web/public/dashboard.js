@@ -123,6 +123,7 @@ const state = {
   dnsLatest: null,
   httpTtfbSeries: [],
   httpTotalSeries: [],
+  httpLatest: { ttfb: null, total: null },
   trends: new Map(),
   severities: new Map(),
   prevValues: new Map(),
@@ -199,11 +200,9 @@ function updateLayoutClasses() {
   document.body.classList.toggle("is-compact", state.compactMode);
   document.body.classList.toggle("is-medium", isMedium);
   updatePanelVisibility();
-  if (wasCompact !== state.compactMode && charts.availability) {
-    configureGauge();
-    const summary = getCurrentWindowSummary();
-    const availability = summary?.win_availability_pct ?? null;
-    updateGauge(availability);
+  if (wasCompact !== state.compactMode) {
+    configureGauges();
+    refreshGaugeValues();
   }
   if (wasCompact !== state.compactMode) {
     renderHeatmap();
@@ -237,9 +236,9 @@ const charts = {
   latency: null,
   heatmap: null,
   availability: null,
-  dns: null,
+  dnsGauge: null,
+  httpGauge: null,
   httpTtfb: null,
-  httpTotal: null,
 };
 
 const chartOverlays = new Map();
@@ -368,9 +367,9 @@ function initChartOverlays() {
   [
     "latencyChart",
     "heatmapChart",
-    "dnsSparkline",
+    "dnsGauge",
     "httpTtfbSparkline",
-    "httpTotalSparkline",
+    "httpGauge",
   ].forEach((id) => ensureChartOverlay(id));
 }
 
@@ -415,6 +414,8 @@ function mountTheme() {
     } catch (error) {
       // Ignore storage errors.
     }
+    configureGauges();
+    refreshGaugeValues();
     resizeCharts();
   });
 }
@@ -527,11 +528,9 @@ function initCharts() {
   charts.availability = echarts.init(document.getElementById("availabilityGauge"), null, {
     renderer: "canvas",
   });
-  charts.dns = echarts.init(document.getElementById("dnsSparkline"), null, { renderer: "canvas" });
+  charts.dnsGauge = echarts.init(document.getElementById("dnsGauge"), null, { renderer: "canvas" });
+  charts.httpGauge = echarts.init(document.getElementById("httpGauge"), null, { renderer: "canvas" });
   charts.httpTtfb = echarts.init(document.getElementById("httpTtfbSparkline"), null, {
-    renderer: "canvas",
-  });
-  charts.httpTotal = echarts.init(document.getElementById("httpTotalSparkline"), null, {
     renderer: "canvas",
   });
 
@@ -539,10 +538,8 @@ function initCharts() {
   if (HEATMAP_ENABLED) {
     configureHeatmap();
   }
-  configureGauge();
-  configureSparkline(charts.dns, "#38bdf8");
+  configureGauges();
   configureSparkline(charts.httpTtfb, "#f97316");
-  configureSparkline(charts.httpTotal, "#8b5cf6");
 }
 
 function configureLatencyChart() {
@@ -707,94 +704,352 @@ function configureHeatmap() {
   });
 }
 
-function configureGauge() {
-  if (!charts.availability) {
-    return;
-  }
-  const baseLabelColor = getCssVar("--text-base", "#e6edf3");
-  if (state.compactMode) {
+const GAUGE_COLOR_OK = "#3fb950";
+const GAUGE_COLOR_WARN = "#d29922";
+const GAUGE_COLOR_CRIT = "#f85149";
+const GAUGE_COLOR_NEUTRAL = "#64748b";
+
+function configureGauges() {
+  const labelColor = getCssVar("--text-muted", "#94a3b8");
+  const detailColor = getCssVar("--text-base", "#e6edf3");
+  const tickColor = "rgba(148, 163, 184, 0.35)";
+  const splitColor = "rgba(148, 163, 184, 0.45)";
+  const axisWidth = state.compactMode ? 14 : 18;
+  const tickLength = state.compactMode ? 5 : 8;
+  const splitLength = state.compactMode ? 10 : 14;
+  const labelDistance = state.compactMode ? 8 : 12;
+  const detailFontSize = state.compactMode ? 22 : 30;
+  const pointerWidth = state.compactMode ? 4 : 6;
+  const anchorSize = state.compactMode ? 6 : 8;
+  const anchorColor = getCssVar("--chart-anchor", "#0f172a");
+
+  const baseSeries = {
+    type: "gauge",
+    startAngle: 225,
+    endAngle: -45,
+    min: 0,
+    max: 100,
+    splitNumber: 10,
+    progress: { show: false },
+    axisLine: { lineStyle: { width: axisWidth, color: [[1, GAUGE_COLOR_OK]] } },
+    axisTick: { length: tickLength, distance: 0, lineStyle: { color: tickColor, width: 1 } },
+    splitLine: { length: splitLength, distance: 0, lineStyle: { color: splitColor, width: 2 } },
+    axisLabel: { color: labelColor, distance: labelDistance, fontSize: state.compactMode ? 10 : 12 },
+    pointer: { show: true, length: "70%", width: pointerWidth, itemStyle: { color: GAUGE_COLOR_OK } },
+    anchor: { show: true, showAbove: true, size: anchorSize, itemStyle: { color: anchorColor } },
+    detail: {
+      fontSize: detailFontSize,
+      fontWeight: 600,
+      color: detailColor,
+      offsetCenter: [0, "50%"],
+      valueAnimation: true,
+      formatter: () => "—",
+    },
+    title: { show: false },
+    data: [{ value: 0 }],
+  };
+
+  if (charts.availability) {
     charts.availability.setOption({
-      animationDuration: 220,
-      grid: { left: 14, right: 24, top: 20, bottom: 28, containLabel: true },
-      xAxis: {
-        type: "value",
-        min: 0,
-        max: 100,
-        splitNumber: 5,
-        axisLabel: {
-          color: "var(--text-muted)",
-          fontSize: 11,
-          formatter: (val) => `${Math.round(val)}%`,
-        },
-        axisTick: { show: false },
-        axisLine: { lineStyle: { color: "rgba(88, 166, 255, 0.25)" } },
-        splitLine: { show: false },
-      },
-      yAxis: {
-        type: "category",
-        data: ["Disponibilidade"],
-        axisTick: { show: false },
-        axisLine: { show: false },
-        axisLabel: { color: "var(--text-muted)", fontSize: 11 },
-      },
+      animationDuration: 240,
       series: [
         {
-          type: "bar",
-          data: [0],
-          barWidth: 22,
-          itemStyle: { borderRadius: [12, 12, 12, 12], color: "#3fb950" },
-          label: {
-            show: true,
-            position: "right",
-            color: baseLabelColor,
-            fontWeight: 600,
-            formatter: () => "—",
-          },
-          animationDuration: 240,
+          ...baseSeries,
+          min: 0,
+          max: 100,
+          splitNumber: 10,
+          axisLabel: { ...baseSeries.axisLabel, formatter: (val) => `${Math.round(val)}%` },
         },
       ],
     });
+  }
+  if (charts.dnsGauge) {
+    charts.dnsGauge.setOption({
+      animationDuration: 240,
+      series: [
+        {
+          ...baseSeries,
+          min: 0,
+          max: 500,
+          splitNumber: 5,
+          axisLabel: { ...baseSeries.axisLabel, formatter: (val) => `${Math.round(val)} ms` },
+        },
+      ],
+    });
+  }
+  if (charts.httpGauge) {
+    charts.httpGauge.setOption({
+      animationDuration: 240,
+      series: [
+        {
+          ...baseSeries,
+          min: 0,
+          max: 3000,
+          splitNumber: 5,
+          axisLabel: { ...baseSeries.axisLabel, formatter: (val) => `${Math.round(val)} ms` },
+        },
+      ],
+    });
+  }
+
+  refreshGaugeValues();
+}
+
+function refreshGaugeValues() {
+  updateAvailabilityGauge(getAvailabilityGaugeValue());
+  updateDnsGauge(getDnsGaugeValue());
+  updateHttpGauge(getHttpGaugeValue());
+}
+
+function getAvailabilityGaugeValue() {
+  const target = state.selectedTarget;
+  if (!target) {
+    return null;
+  }
+  const summaries = state.windowSummaries.get(target);
+  const summary = summaries ? summaries.get("1m") : null;
+  if (!summary) {
+    return null;
+  }
+  const availability = normalize(summary.win_availability_pct);
+  if (availability != null) {
+    return clampGaugeValue(availability);
+  }
+  const loss = normalize(summary.win_loss_pct);
+  return loss == null ? null : clampGaugeValue(100 - loss);
+}
+
+function getDnsGaugeValue() {
+  const stats = selectDnsPrimaryStats(state.dnsLatest);
+  return stats ? normalize(stats.win1m_avg_ms) : null;
+}
+
+function getHttpGaugeValue() {
+  return normalize(state.httpLatest?.total);
+}
+
+function updateAvailabilityGauge(value) {
+  if (!charts.availability) {
     return;
   }
+  const numeric = Number.isFinite(value) ? clampGaugeValue(value) : null;
+  const threshold = thresholds.loss;
+  const pointerColor = numeric == null ? GAUGE_COLOR_NEUTRAL : resolveGaugeSeverityColor(numeric, threshold, false);
+  const axisColors = buildGaugeAxisColors({ min: 0, max: 100, threshold, higherIsBad: false });
   charts.availability.setOption({
-    animationDuration: 240,
     series: [
       {
-        type: "gauge",
-        startAngle: 225,
-        endAngle: -45,
         min: 0,
         max: 100,
         splitNumber: 10,
-        axisLine: {
-          lineStyle: {
-            width: 18,
-            color: [
-              [0.8, "#f85149"],
-              [0.95, "#d29922"],
-              [1, "#3fb950"],
-            ],
-          },
-        },
-        pointer: {
-          width: 6,
-          show: false,
-          itemStyle: { color: "#3fb950" },
-        },
-        axisTick: { show: false },
-        splitLine: { length: 12, distance: 6, lineStyle: { color: "rgba(148,163,184,0.25)" } },
-        axisLabel: { color: "var(--text-muted)", distance: 10, fontSize: 11 },
+        axisLine: { lineStyle: { color: axisColors } },
+        pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
         detail: {
-          fontSize: 30,
-          color: "#8b949e",
-          valueAnimation: true,
-          formatter: () => "—",
+          color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
+          formatter: () => (numeric == null ? "—" : fmtPct(numeric)),
         },
-        title: { show: false },
-        data: [{ value: 0 }],
+        data: [{ value: numeric ?? 0 }],
       },
     ],
   });
+  setChartEmptyState("availabilityGauge", numeric == null);
+}
+
+function updateDnsGauge(value) {
+  if (!charts.dnsGauge) {
+    return;
+  }
+  const numeric = clampMsValue(value);
+  const threshold = thresholds.dns;
+  const candidates = [numeric, normalize(threshold?.warn), normalize(threshold?.crit)];
+  const max = computeDynamicGaugeMax(state.dnsSeries, {
+    fallback: 200,
+    min: 100,
+    max: 1000,
+    include: candidates,
+  });
+  const pointerColor = numeric == null ? GAUGE_COLOR_NEUTRAL : resolveGaugeSeverityColor(numeric, threshold, true);
+  const axisColors = buildGaugeAxisColors({ min: 0, max, threshold, higherIsBad: true });
+  charts.dnsGauge.setOption({
+    series: [
+      {
+        min: 0,
+        max,
+        splitNumber: 5,
+        axisLabel: { formatter: (val) => `${Math.round(val)} ms` },
+        axisLine: { lineStyle: { color: axisColors } },
+        pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
+        detail: {
+          color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
+          formatter: () => (numeric == null ? "—" : fmtMs(numeric)),
+        },
+        data: [{ value: numeric == null ? 0 : Math.min(numeric, max) }],
+      },
+    ],
+  });
+  setChartEmptyState("dnsGauge", numeric == null);
+}
+
+function updateHttpGauge(value) {
+  if (!charts.httpGauge) {
+    return;
+  }
+  const numeric = clampMsValue(value);
+  const threshold = thresholds.ttfb;
+  const candidates = [numeric, normalize(threshold?.warn), normalize(threshold?.crit)];
+  const max = computeDynamicGaugeMax(state.httpTotalSeries, {
+    fallback: 800,
+    min: 200,
+    max: 3000,
+    include: candidates,
+  });
+  const pointerColor = numeric == null ? GAUGE_COLOR_NEUTRAL : resolveGaugeSeverityColor(numeric, threshold, true);
+  const axisColors = buildGaugeAxisColors({ min: 0, max, threshold, higherIsBad: true });
+  charts.httpGauge.setOption({
+    series: [
+      {
+        min: 0,
+        max,
+        splitNumber: 5,
+        axisLabel: { formatter: (val) => `${Math.round(val)} ms` },
+        axisLine: { lineStyle: { color: axisColors } },
+        pointer: { show: numeric != null, itemStyle: { color: pointerColor } },
+        detail: {
+          color: numeric == null ? getCssVar("--text-muted", "#94a3b8") : pointerColor,
+          formatter: () => (numeric == null ? "—" : fmtMs(numeric)),
+        },
+        data: [{ value: numeric == null ? 0 : Math.min(numeric, max) }],
+      },
+    ],
+  });
+  setChartEmptyState("httpGauge", numeric == null);
+}
+
+function resolveGaugeSeverityColor(value, threshold, higherIsBad) {
+  if (value == null || !Number.isFinite(value)) {
+    return GAUGE_COLOR_NEUTRAL;
+  }
+  const severity = determineSeverity(value, threshold, higherIsBad !== false);
+  if (severity === "critical") {
+    return GAUGE_COLOR_CRIT;
+  }
+  if (severity === "warn") {
+    return GAUGE_COLOR_WARN;
+  }
+  return GAUGE_COLOR_OK;
+}
+
+function buildGaugeAxisColors({ min, max, threshold, higherIsBad }) {
+  const safeMin = Number.isFinite(min) ? min : 0;
+  const safeMax = Number.isFinite(max) && max > safeMin ? max : safeMin + 1;
+  const range = safeMax - safeMin;
+  const clampRatio = (value) => {
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+    const ratio = (value - safeMin) / range;
+    return Math.max(0, Math.min(1, ratio));
+  };
+
+  if (!threshold) {
+    return [[1, GAUGE_COLOR_OK]];
+  }
+
+  if (higherIsBad === false) {
+    const warn = Number(threshold.warn);
+    const crit = Number(threshold.crit);
+    const warnValue = Number.isFinite(warn) ? clampGaugeValue(100 - warn) : null;
+    const critValue = Number.isFinite(crit) ? clampGaugeValue(100 - crit) : null;
+    const critRatio = clampRatio(critValue);
+    const warnRatio = clampRatio(warnValue);
+    const colors = [];
+    if (critRatio != null) {
+      colors.push([critRatio, GAUGE_COLOR_CRIT]);
+    }
+    if (warnRatio != null && (critRatio == null || warnRatio > critRatio)) {
+      colors.push([warnRatio, GAUGE_COLOR_WARN]);
+    }
+    colors.push([1, GAUGE_COLOR_OK]);
+    return colors;
+  }
+
+  const warn = Number(threshold.warn);
+  const crit = Number(threshold.crit);
+  const warnRatio = clampRatio(warn);
+  const critRatio = clampRatio(crit);
+  const segments = [];
+  if (warnRatio != null && warnRatio > 0) {
+    segments.push([Math.min(warnRatio, 1), GAUGE_COLOR_OK]);
+  }
+  if (critRatio != null) {
+    const previousRatio = segments.length ? segments[segments.length - 1][0] : 0;
+    const midColor = warnRatio != null ? GAUGE_COLOR_WARN : GAUGE_COLOR_OK;
+    const effectiveCrit = Math.min(Math.max(critRatio, previousRatio), 1);
+    if (effectiveCrit > previousRatio) {
+      segments.push([effectiveCrit, midColor]);
+    } else if (!segments.length) {
+      segments.push([effectiveCrit, midColor]);
+    }
+    segments.push([1, GAUGE_COLOR_CRIT]);
+    return segments;
+  }
+  if (segments.length) {
+    segments.push([1, GAUGE_COLOR_WARN]);
+  } else {
+    segments.push([1, GAUGE_COLOR_OK]);
+  }
+  return segments;
+}
+
+function computeDynamicGaugeMax(series, options = {}) {
+  const fallback = Number.isFinite(options.fallback) ? options.fallback : 100;
+  const min = Number.isFinite(options.min) ? options.min : 50;
+  const maxCap = Number.isFinite(options.max) ? options.max : 2000;
+  const include = Array.isArray(options.include) ? options.include : [];
+
+  const values = [];
+  if (Array.isArray(series)) {
+    series.forEach((item) => {
+      const value = normalize(item?.value ?? item?.val ?? item);
+      if (Number.isFinite(value) && value >= 0) {
+        values.push(value);
+      }
+    });
+  }
+  include.forEach((candidate) => {
+    const normalized = normalize(candidate);
+    if (Number.isFinite(normalized) && normalized >= 0) {
+      values.push(normalized);
+    }
+  });
+
+  const observedMax = values.length ? Math.max(...values) : fallback;
+  const padded = Math.max(observedMax * 1.2, fallback);
+  const clamped = Math.min(Math.max(padded, min), maxCap);
+  const nice = niceCeil(clamped);
+  return Math.min(Math.max(nice, min), maxCap);
+}
+
+function niceCeil(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 1;
+  }
+  const exponent = Math.pow(10, Math.floor(Math.log10(value)));
+  const multiples = [1, 2, 2.5, 5, 10];
+  for (const multiple of multiples) {
+    const candidate = multiple * exponent;
+    if (candidate >= value) {
+      return candidate;
+    }
+  }
+  return 10 * exponent;
+}
+
+function clampMsValue(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return value <= 0 ? 0 : value;
 }
 
 function configureSparkline(chart, color) {
@@ -1173,6 +1428,7 @@ function ingestDnsMetrics(dns, ts) {
   state.dnsSeries.push(entry);
   pruneSeries(state.dnsSeries, DNS_HISTORY_LIMIT_MS);
   updateDnsKpi();
+  updateDnsGauge(value);
   updateEventsForMetric("dns", value, thresholds.dns, "DNS lookup elevado", {
     formatter: fmtMs,
     eventType: "dns",
@@ -1220,6 +1476,7 @@ function ingestHttpMetrics(http, ts) {
   };
   state.httpTtfbSeries.push(ttfbEntry);
   pruneSeries(state.httpTtfbSeries, DNS_HISTORY_LIMIT_MS);
+  state.httpLatest.ttfb = ttfbValue;
   updateKpi("http-ttfb", ttfbValue, {
     threshold: thresholds.ttfb,
     higherIsBad: true,
@@ -1239,12 +1496,14 @@ function ingestHttpMetrics(http, ts) {
   };
   state.httpTotalSeries.push(totalEntry);
   pruneSeries(state.httpTotalSeries, DNS_HISTORY_LIMIT_MS);
+  state.httpLatest.total = totalValue;
   updateKpi("http-total", totalValue, {
     threshold: thresholds.ttfb,
     higherIsBad: true,
     trendKey: "http-total",
     subText: `5m: ${fmtMs(totalEntry.avg5m)}`,
   });
+  updateHttpGauge(totalValue);
 }
 function updateKpis(summary) {
   const p95 = summary?.win_p95_ms;
@@ -1286,68 +1545,7 @@ function updateKpis(summary) {
     formatter: (value) => fmtPct(value),
     status,
   });
-  updateGauge(availability);
   updateNetworkStatus(summary);
-}
-
-function getAvailabilityColor(value) {
-  if (value == null || !Number.isFinite(value)) {
-    return "#64748b";
-  }
-  if (value >= 95) {
-    return "#3fb950";
-  }
-  if (value >= 80) {
-    return "#d29922";
-  }
-  return "#f85149";
-}
-
-function updateGauge(value) {
-  if (!charts.availability) {
-    return;
-  }
-  const numeric = Number.isFinite(value) ? clampGaugeValue(value) : null;
-  const color = getAvailabilityColor(numeric);
-  const baseLabelColor = getCssVar("--text-base", "#e6edf3");
-  if (state.compactMode) {
-    const labelColor = color === "#f85149" ? "#f85149" : baseLabelColor;
-    charts.availability.setOption({
-      series: [
-        {
-          data: [numeric ?? 0],
-          itemStyle: { color },
-          label: {
-            formatter: () => (numeric == null ? "—" : fmtPct(numeric)),
-            color: labelColor,
-          },
-        },
-      ],
-      xAxis: { min: 0, max: 100 },
-    });
-    return;
-  }
-  const axisColor =
-    numeric == null
-      ? [[1, "#475569"]]
-      : [
-          [0.8, "#f85149"],
-          [0.95, "#d29922"],
-          [1, "#3fb950"],
-        ];
-  charts.availability.setOption({
-    series: [
-      {
-        data: [{ value: numeric ?? 0 }],
-        axisLine: { lineStyle: { color: axisColor } },
-        pointer: { show: numeric != null, itemStyle: { color } },
-        detail: {
-          color,
-          formatter: () => (numeric == null ? "—" : fmtPct(numeric)),
-        },
-      },
-    ],
-  });
 }
 
 function renderKpiValue(element, valueText) {
@@ -1385,6 +1583,7 @@ function getCurrentWindowSummary() {
 function applyCurrentWindowSummary() {
   const summary = getCurrentWindowSummary();
   updateKpis(summary);
+  refreshGaugeValues();
 }
 
 function buildSummaryFromMetrics(metrics, key) {
@@ -1775,9 +1974,7 @@ function render() {
     renderHeatmap();
     heatmapNeedsRefresh = false;
   }
-  renderSparkline(charts.dns, state.dnsSeries);
   renderSparkline(charts.httpTtfb, state.httpTtfbSeries);
-  renderSparkline(charts.httpTotal, state.httpTotalSeries);
   renderEvents();
   renderTraceroute();
 }
