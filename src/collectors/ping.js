@@ -10,7 +10,7 @@ import {
 } from "../runtime/windows.js";
 
 const DEFAULT_TARGETS = ["8.8.8.8"];
-const DEFAULT_INTERVAL_S = 60;
+const DEFAULT_INTERVAL_S = 1;
 const DEFAULT_TIMEOUT_MS = 3000;
 const DEFAULT_TCP_PORT = 443;
 const DEFAULT_FALLBACK_AFTER_FAILS = 3;
